@@ -27,17 +27,6 @@ COPY src/ ./src/
 # Drop to non-root user
 USER app
 
-# Env vars (must be provided at runtime via -e or .env mount)
-ENV QDRANT_URL="" \
-    QDRANT_API_KEY="" \
-    VECTOR_DIM="" \
-    COLLECTION_PREFIX="" \
-    APP_ENV="" \
-    TAPIS_ISSUER="" \
-    TAPIS_JWKS_URL="" \
-    TAPIS_TENANT_ID="" \
-    ALLOWED_ORIGINS=""
-
 EXPOSE 8000
 
 ENTRYPOINT ["uvicorn", "src.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
