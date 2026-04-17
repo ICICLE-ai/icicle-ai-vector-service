@@ -2,8 +2,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .settings import settings
-
 
 class EmbeddingCreate(BaseModel):
     embedding: list[float]
@@ -12,7 +10,7 @@ class EmbeddingCreate(BaseModel):
     chunks: list[str]
     token_ids: list[int] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
-    embedding_model: str | None = None
+    embedding_model: str
 
     @field_validator("collection")
     @classmethod
@@ -34,10 +32,16 @@ class EmbeddingCreate(BaseModel):
     @field_validator("embedding")
     @classmethod
     def validate_embedding(cls, value: list[float]) -> list[float]:
-        if len(value) != settings.vector_dim:
-            raise ValueError(
-                f"embedding must have exactly {settings.vector_dim} dimensions, got {len(value)}"
-            )
+        if not value:
+            raise ValueError("embedding must be a non-empty list of floats")
+        return value
+
+    @field_validator("embedding_model")
+    @classmethod
+    def validate_embedding_model(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("embedding_model is required (e.g. 'nvidia/nvclip', 'gemini-embedding-001')")
         return value
 
     @model_validator(mode="after")
@@ -64,15 +68,6 @@ class EmbeddingUpdate(BaseModel):
                 raise ValueError("topic must be a non-empty string")
         return value
 
-    @field_validator("embedding")
-    @classmethod
-    def validate_embedding(cls, value: list[float] | None) -> list[float] | None:
-        if value is not None and len(value) != settings.vector_dim:
-            raise ValueError(
-                f"embedding must have exactly {settings.vector_dim} dimensions, got {len(value)}"
-            )
-        return value
-
     @model_validator(mode="after")
     def ensure_updates(self) -> "EmbeddingUpdate":
         if (
@@ -95,9 +90,10 @@ class EmbeddingRecord(BaseModel):
     user_id: str
     collection: str
     topic: str | None = None
+    vector_dim: int
     created_at: str
     updated_at: str
-    embedding_model: str | None = None
+    embedding_model: str
 
 
 class MetadataFilter(BaseModel):
@@ -133,12 +129,9 @@ class RetrieveRequest(BaseModel):
     @field_validator("query_embedding")
     @classmethod
     def validate_embedding(cls, value: list[float]) -> list[float]:
-        if len(value) != settings.vector_dim:
-            raise ValueError(
-                f"query_embedding must have exactly {settings.vector_dim} dimensions, got {len(value)}"
-            )
+        if not value:
+            raise ValueError("query_embedding must be a non-empty list of floats")
         return value
-
 
 
 class RerankRequest(BaseModel):
@@ -162,10 +155,8 @@ class RerankRequest(BaseModel):
     @field_validator("query_embedding")
     @classmethod
     def validate_embedding(cls, value: list[float]) -> list[float]:
-        if len(value) != settings.vector_dim:
-            raise ValueError(
-                f"query_embedding must have exactly {settings.vector_dim} dimensions, got {len(value)}"
-            )
+        if not value:
+            raise ValueError("query_embedding must be a non-empty list of floats")
         return value
 
 

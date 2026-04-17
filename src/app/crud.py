@@ -18,7 +18,6 @@ from qdrant_client.http.models import (
 )
 
 from .schemas import MetadataFilter
-from .settings import settings
 
 Payload = dict[str, Any]
 
@@ -40,12 +39,25 @@ async def _collection_exists(client: AsyncQdrantClient, collection_name: str) ->
     return any(col.name == collection_name for col in collections.collections or [])
 
 
-async def ensure_collection(client: AsyncQdrantClient, collection: str) -> str:
+async def ensure_collection(
+    client: AsyncQdrantClient, collection: str, vector_dim: int | None = None
+) -> str:
+    """Ensure a Qdrant collection exists.
+
+    When creating a new collection, ``vector_dim`` is required (taken from the
+    first embedding stored). For reads/queries the collection must already exist.
+    """
     collection_name = _collection_name(collection)
     if not await _collection_exists(client, collection_name):
+        if vector_dim is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Collection '{collection}' does not exist yet. "
+                "Store an embedding first to create it.",
+            )
         await client.create_collection(
             collection_name=collection_name,
-            vectors_config=VectorParams(size=settings.vector_dim, distance=Distance.COSINE),
+            vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE),
         )
     return collection_name
 
@@ -58,7 +70,8 @@ def _base_payload(
     text: str | None,
     chunks: list[str],
     metadata: dict[str, Any],
-    embedding_model: str | None,
+    embedding_model: str,
+    vector_dim: int,
     created_at: str,
     updated_at: str,
 ) -> Payload:
@@ -71,6 +84,7 @@ def _base_payload(
         "chunks": chunks,
         "metadata": metadata,
         "embedding_model": embedding_model,
+        "vector_dim": vector_dim,
         "created_at": created_at,
         "updated_at": updated_at,
     }
@@ -82,7 +96,8 @@ async def create_embedding(
     user_id = payload["user_id"]
     collection = payload["collection"]
     topic = payload.get("topic")
-    collection_name = await ensure_collection(client, collection)
+    vector_dim = len(payload["embedding"])
+    collection_name = await ensure_collection(client, collection, vector_dim=vector_dim)
 
     now = datetime.now(timezone.utc).isoformat()
     point_id = str(uuid.uuid4())
@@ -94,7 +109,8 @@ async def create_embedding(
         text=payload.get("text"),
         chunks=payload.get("chunks", []),
         metadata=payload.get("metadata", {}),
-        embedding_model=payload.get("embedding_model"),
+        embedding_model=payload["embedding_model"],
+        vector_dim=vector_dim,
         created_at=now,
         updated_at=now,
     )
@@ -105,9 +121,10 @@ async def create_embedding(
         "user_id": user_id,
         "collection": collection,
         "topic": topic,
+        "vector_dim": vector_dim,
         "created_at": now,
         "updated_at": now,
-        "embedding_model": payload.get("embedding_model"),
+        "embedding_model": payload["embedding_model"],
     }
 
 
@@ -139,6 +156,7 @@ async def update_embedding(
     text = updates.get("text", current_payload.get("text"))
     chunks = updates.get("chunks", current_payload.get("chunks", []))
     embedding_model = updates.get("embedding_model") or current_payload.get("embedding_model")
+    vector_dim = len(vector) if isinstance(vector, list) else current_payload.get("vector_dim", 0)
     updated_at = datetime.now(timezone.utc).isoformat()
 
     new_payload = _base_payload(
@@ -150,6 +168,7 @@ async def update_embedding(
         chunks=chunks,
         metadata=metadata,
         embedding_model=embedding_model,
+        vector_dim=vector_dim,
         created_at=created_at,
         updated_at=updated_at,
     )
@@ -160,6 +179,7 @@ async def update_embedding(
         "user_id": user_id,
         "collection": collection,
         "topic": topic,
+        "vector_dim": vector_dim,
         "created_at": created_at,
         "updated_at": updated_at,
         "embedding_model": embedding_model,
@@ -215,7 +235,7 @@ async def retrieve_embeddings(
     topic: str | None = None,
     metadata_filter: MetadataFilter | None = None,
 ) -> list[dict[str, Any]]:
-    collection_name = await ensure_collection(client, collection)
+    collection_name = await ensure_collection(client, collection, vector_dim=None)
     response = await client.query_points(
         collection_name=collection_name,
         query=query_embedding,
@@ -247,7 +267,7 @@ async def fetch_candidates(
     topic: str | None = None,
     metadata_filter: MetadataFilter | None = None,
 ) -> list[dict[str, Any]]:
-    collection_name = await ensure_collection(client, collection)
+    collection_name = await ensure_collection(client, collection, vector_dim=None)
     response = await client.query_points(
         collection_name=collection_name,
         query=query_embedding,

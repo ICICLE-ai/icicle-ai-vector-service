@@ -54,7 +54,6 @@ cp .env.example .env
 | ----------------- | -------- | -------------------------------------------------------------- |
 | `QDRANT_URL`      | yes      | Qdrant server URL (append `:443` if behind HTTPS proxy)        |
 | `QDRANT_API_KEY`  | no       | Qdrant API key (if auth is enabled)                            |
-| `VECTOR_DIM`      | yes      | Expected embedding dimensions (must match client vectors)      |
 | `APP_ENV`         | no       | `dev` or `prod`                                                |
 | `TAPIS_ISSUER`    | yes      | JWT issuer to validate (`https://icicleai.tapis.io/v3/tokens`) |
 | `TAPIS_JWKS_URL`  | yes      | JWKS endpoint for token signature verification                 |
@@ -91,6 +90,12 @@ Every request (except `/healthz`) requires a valid **ICICLE AI tenant** Tapis ac
 - Validates the issuer matches `TAPIS_ISSUER`
 - Ensures `tapis/tenant_id` is `icicleai`
 - Extracts `tapis/username` for per-user data isolation
+
+### How to get your access token
+
+Log in to the [ICICLEaaS Portal](https://icicleai.tapis.io), click your username in the bottom-left corner, and select **Copy Access Token**.
+
+![Getting your Tapis access token](docs/images/tapis-access-token.png)
 
 
 | Scenario                   | Status | Response                                                                        |
@@ -320,7 +325,7 @@ Response (`200`):
 
 - **"Qdrant is not reachable"**: If Qdrant is behind an HTTPS reverse proxy (port 443), append `:443` to `QDRANT_URL` (e.g. `https://host.example.com:443`). The qdrant-client library defaults to port 6333 if no port is specified.
 - **401/403 errors**: Ensure your Tapis token is fresh, from the `icicleai` tenant, and passed via the `X-Tapis-Token` header.
-- **Dimension mismatch**: The `embedding` array length must match `VECTOR_DIM` (default 768).
+- **Dimension mismatch**: The `embedding` array length must match the collection's dimension (set by the first embedding stored in that collection).
 - **"collection is required"**: All retrieve/rerank requests must specify which collection to query.
 
 ---
@@ -438,10 +443,13 @@ Response (`200`):
 - **Collection = broad domain**: Each domain (e.g. `biology`, `chemistry`) gets its own Qdrant collection with its own HNSW index. Similarity search only traverses vectors in the same domain, resulting in higher relevance and faster queries.
 - **Topic = optional sub-category**: Topics (e.g. `human`, `plant`, `organic`) are payload fields within a collection. They allow narrowing search results without creating separate collections. A collection can have embeddings with different topics, or no topic at all.
 - **User isolation via payload filter**: Collections are shared across all users, but every query automatically filters by `user_id` (extracted from the JWT). Users never see each other's data.
-- **No server-side embedding**: Clients provide pre-computed vectors. This keeps the service model-agnostic and lightweight — any embedding model works as long as dimensions match `VECTOR_DIM`.
+- **No server-side embedding**: Clients provide pre-computed vectors. This keeps the service model-agnostic and lightweight — any embedding model works. The vector dimension is set per collection by the first embedding stored.
+- **Dynamic vector dimensions**: There is no global `VECTOR_DIM` setting. Each collection's dimension is determined by the first embedding stored in it (e.g. 768 for Gemini, 1024 for NVIDIA NVClip, 4096 for NV-Embed-v1). All subsequent embeddings in the same collection must match that dimension — Qdrant enforces this automatically. The `embedding_model` field is required so the model that produced each vector is always tracked.
 - **Metadata filtering at search time**: Qdrant applies payload filters during the HNSW traversal (not as a post-filter), so filtered searches remain efficient even on large collections.
 - **Auth boundary**: JWKS-validated Tapis JWTs are the sole security gate. CORS is open by default (`*`) since the token is what matters, not the origin.
 - **Update/Delete require collection**: Since Qdrant doesn't support global ID lookups across collections, the `collection` query param is required on update/delete to enable a direct O(1) lookup by embedding ID.
+
+> **Data storage notice:** Text chunks, metadata, and embeddings are stored **as-is** in Qdrant without encryption at rest. The service relies on JWT-based user isolation and network-level security (internal pod-to-pod communication) to protect data. If your use case requires encryption at rest, configure it at the Qdrant storage layer or the underlying volume/disk level.
 
 ---
 
@@ -469,12 +477,12 @@ All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 
 | Field             | Required | Description                                                                       |
 | ----------------- | -------- | --------------------------------------------------------------------------------- |
-| `embedding`       | yes      | Float array, must match `VECTOR_DIM` (default 768)                                |
+| `embedding`       | yes      | Float array (any dimension — set per collection on first store)                    |
 | `collection`      | yes      | Broad domain name — maps to a Qdrant collection (e.g. `"biology"`, `"chemistry"`) |
 | `topic`           | no       | Sub-category within the collection (e.g. `"human"`, `"plant"`, `"organic"`)       |
 | `chunks`          | yes      | At least one non-empty string                                                     |
 | `metadata`        | no       | Free-form dict for extra info (`source`, `page`, etc.)                            |
-| `embedding_model` | no       | Name of the model used to generate the embedding                                  |
+| `embedding_model` | yes      | Name of the model used to generate the embedding (e.g. `"nvidia/nvclip"`)         |
 | `token_ids`       | no       | Tokenizer output IDs (for debugging)                                              |
 
 
@@ -483,7 +491,7 @@ All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 
 | Field             | Required | Description                                          |
 | ----------------- | -------- | ---------------------------------------------------- |
-| `query_embedding` | yes      | Float array, must match `VECTOR_DIM`                 |
+| `query_embedding` | yes      | Float array (must match the collection's dimension)  |
 | `collection`      | yes      | Which collection to search                           |
 | `top_k`           | no       | Number of results (default 10, max 100)              |
 | `topic`           | no       | Narrow results to a specific sub-category            |
@@ -495,7 +503,7 @@ All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 
 | Field             | Required | Description                                                   |
 | ----------------- | -------- | ------------------------------------------------------------- |
-| `query_embedding` | yes      | Float array, must match `VECTOR_DIM`                          |
+| `query_embedding` | yes      | Float array (must match the collection's dimension)           |
 | `collection`      | yes      | Which collection to search                                    |
 | `top_k`           | no       | Final number of results (default 10, max 100)                 |
 | `fetch_k`         | no       | Candidates to fetch before reranking (default 50, max 500)    |
