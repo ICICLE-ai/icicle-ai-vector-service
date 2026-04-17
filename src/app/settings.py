@@ -6,7 +6,6 @@ class Settings(BaseSettings):
 
     qdrant_url: str
     qdrant_api_key: str | None = None
-    vector_dim: int = 768
     collection_prefix: str = "embeddings"
     app_env: str = "dev"
     tapis_issuer: str
