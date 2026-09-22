@@ -15,10 +15,13 @@ COPY src/ ./src/
 # still runs, and only the "cross_encoder" rerank method returns 503.
 ARG RERANK=1
 
+# Torch comes from the CPU wheel index alone, then the project from PyPI.
+# Mixing the two indexes in one resolve lets PyTorch's copies of common packages
+# (an old urllib3, among others) win over PyPI's, which breaks qdrant-client.
 RUN if [ "$RERANK" = "1" ]; then \
         pip install --no-cache-dir --prefix=/install \
-            --extra-index-url https://download.pytorch.org/whl/cpu \
-            ".[rerank]"; \
+            --index-url https://download.pytorch.org/whl/cpu torch && \
+        pip install --no-cache-dir --prefix=/install ".[rerank]"; \
     else \
         pip install --no-cache-dir --prefix=/install .; \
     fi && \

@@ -33,10 +33,19 @@ jobs:
       - name: Install uv
         run: pip install --upgrade uv
 
-      - name: Install project (with rerank extra)
+      # Torch is installed on its own, from the CPU wheel index only. Passing that
+      # index alongside PyPI makes uv resolve *every* package against it (its
+      # dependency-confusion guard: first index that has a package wins), and the
+      # PyTorch index carries an old pinned urllib3 that qdrant-client rejects.
+      # Installing torch first, then the project from PyPI, keeps each index
+      # scoped to what it is actually for.
+      - name: Install CPU-only torch
         run: |
-          uv pip install --system ".[rerank,dev]" \
-            --extra-index-url https://download.pytorch.org/whl/cpu
+          uv pip install --system torch \
+            --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project (with rerank extra)
+        run: uv pip install --system ".[rerank,dev]"
 
       # The suite is hermetic: an in-memory Qdrant and a stubbed current-user
       # dependency, so it needs no Qdrant server and no Tapis token. The env
