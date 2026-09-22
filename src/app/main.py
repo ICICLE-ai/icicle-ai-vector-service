@@ -1,34 +1,23 @@
+"""Application entrypoint.
+
+Wiring only — settings, CORS, lifespan and the versioned router. Endpoint logic
+lives in :mod:`app.api.v1`, data access in :mod:`app.db.repository`.
+"""
+
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from qdrant_client import AsyncQdrantClient
 
-from .auth import UserContext, get_current_user
-from .crud import (
-    create_embedding,
-    delete_embedding,
-    fetch_candidates,
-    retrieve_embeddings,
-    update_embedding,
-)
-from .db import get_qdrant_client, _client
-from .rerank import mmr_rerank
-from .schemas import (
-    DeleteResponse,
-    EmbeddingCreate,
-    EmbeddingRecord,
-    EmbeddingUpdate,
-    RerankRequest,
-    RerankResponse,
-    RetrieveRequest,
-    RetrieveResponse,
-    ResultItem,
-
-)
-from .settings import settings
+from . import __version__, reranking
+from .api.v1 import router as v1_router
+from .core.settings import settings
+from .db import close_client, get_qdrant_client, get_shared_client
+from .db.repository import backfill_payload_indexes
+from .schemas import HealthResponse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,12 +25,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DESCRIPTION = """\
+Vector storage and retrieval service for the ICICLE AI tenant. Clients provide
+their own pre-computed embeddings; the service handles storage, filtered search
+and reranking.
+
+**Collections** are broad domains (e.g. `biology`, `chemistry`), each backed by
+its own Qdrant collection and HNSW index. **Topics** are optional sub-categories
+within a collection (e.g. `human`, `plant`).
+
+**User isolation.** Every request is authenticated with a Tapis access token via
+the `X-Tapis-Token` header, and `user_id` is taken from the token's
+`tapis/username` claim — never from the request body. Collections are physically
+shared, but every read, write, search and delete is filtered by `user_id`, so
+users never see or affect each other's data.
+"""
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Connecting to Qdrant at %s ...", settings.qdrant_url)
     try:
-        client = _client()
+        client = get_shared_client()
         collections = await client.get_collections()
         logger.info(
             "Qdrant is reachable (%d collections found)",
@@ -53,16 +58,38 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             f"Qdrant is not reachable at {settings.qdrant_url}. "
             "Check QDRANT_URL and QDRANT_API_KEY in your .env file."
         ) from exc
+
+    # Collections created before payload indexing existed have no index on
+    # user_id/topic, which turns every filtered search into a full scan.
+    # Creating an existing index is a no-op, so this just converges on startup.
+    try:
+        processed = await backfill_payload_indexes(client)
+        logger.info("Tenancy indexes verified on %d collection(s)", processed)
+    except Exception as exc:
+        logger.warning("Could not verify payload indexes (continuing): %s", exc)
+
+    if reranking.is_available():
+        logger.info(
+            "Cross-encoder reranking available (default model: %s, preload: %s)",
+            settings.rerank_model,
+            settings.rerank_preload,
+        )
+        await reranking.preload()
+    else:
+        logger.info(
+            "Cross-encoder reranking unavailable (sentence-transformers not installed); "
+            "'mmr' and 'cosine_rescore' still work"
+        )
+
     yield
+
+    await close_client()
 
 
 app = FastAPI(
     title="ICICLE AI Vector Service",
-    version="0.5.0",
-    description="Vector storage and retrieval service for the ICICLE AI tenant. "
-    "Clients provide their own pre-computed embeddings. "
-    "Each broad domain is a Qdrant collection (e.g. 'biology', 'chemistry'). "
-    "Topics are optional sub-categories within a collection (e.g. 'human', 'plant').",
+    version=__version__,
+    description=DESCRIPTION,
     lifespan=lifespan,
 )
 
@@ -75,153 +102,24 @@ app.add_middleware(
 )
 
 
-@app.get("/healthz")
-async def health_check() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.post("/v1/embeddings", response_model=EmbeddingRecord, status_code=201)
-async def store_embedding(
-    payload: EmbeddingCreate,
+@app.get("/healthz", response_model=HealthResponse, tags=["health"])
+async def health_check(
     client: AsyncQdrantClient = Depends(get_qdrant_client),
-    current_user: UserContext = Depends(get_current_user),
-) -> EmbeddingRecord:
-    data = payload.model_dump(by_alias=True)
-    data["user_id"] = current_user.username
-    logger.info(
-        "Creating embedding for user '%s' (collection: %s, topic: %s, model: %s, dims: %d)",
-        current_user.username,
-        payload.collection,
-        payload.topic,
-        payload.embedding_model,
-        len(payload.embedding),
-    )
-    record = await create_embedding(client, data)
-    logger.info("Created embedding %s for user '%s'", record["id"], current_user.username)
-    return EmbeddingRecord(**record)
+) -> HealthResponse:
+    """Liveness/readiness probe. The only endpoint that needs no token."""
+    qdrant_status = "ok"
+    try:
+        await client.get_collections()
+    except Exception as exc:
+        logger.warning("Health check: Qdrant unreachable: %s", exc)
+        qdrant_status = "unreachable"
 
-
-@app.put("/v1/embeddings/{embedding_id}", response_model=EmbeddingRecord)
-async def update_user_embedding(
-    embedding_id: str,
-    payload: EmbeddingUpdate,
-    collection: str = Query(..., description="Collection the embedding belongs to"),
-    client: AsyncQdrantClient = Depends(get_qdrant_client),
-    current_user: UserContext = Depends(get_current_user),
-) -> EmbeddingRecord:
-    updates = payload.model_dump(by_alias=True, exclude_none=True)
-    logger.info(
-        "Updating embedding %s for user '%s' in collection '%s' (fields: %s)",
-        embedding_id,
-        current_user.username,
-        collection,
-        list(updates.keys()),
-    )
-    record = await update_embedding(
-        client, current_user.username, collection, embedding_id, updates
-    )
-    logger.info("Updated embedding %s for user '%s'", embedding_id, current_user.username)
-    return EmbeddingRecord(**record)
-
-
-@app.delete("/v1/embeddings/{embedding_id}", response_model=DeleteResponse)
-async def delete_user_embedding(
-    embedding_id: str,
-    collection: str = Query(..., description="Collection the embedding belongs to"),
-    client: AsyncQdrantClient = Depends(get_qdrant_client),
-    current_user: UserContext = Depends(get_current_user),
-) -> DeleteResponse:
-    logger.info(
-        "Deleting embedding %s for user '%s' from collection '%s'",
-        embedding_id,
-        current_user.username,
-        collection,
-    )
-    deleted = await delete_embedding(client, current_user.username, collection, embedding_id)
-    if not deleted:
-        logger.warning(
-            "Embedding %s not found for user '%s' in collection '%s'",
-            embedding_id,
-            current_user.username,
-            collection,
-        )
-        raise HTTPException(
-            status_code=404,
-            detail=f"Embedding '{embedding_id}' not found in collection '{collection}'.",
-        )
-    logger.info("Deleted embedding %s for user '%s'", embedding_id, current_user.username)
-    return DeleteResponse(id=embedding_id, user_id=current_user.username, deleted=True)
-
-
-@app.post("/v1/retrieve", response_model=RetrieveResponse)
-async def retrieve(
-    payload: RetrieveRequest,
-    client: AsyncQdrantClient = Depends(get_qdrant_client),
-    current_user: UserContext = Depends(get_current_user),
-) -> RetrieveResponse:
-    logger.info(
-        "Retrieving top-%d for user '%s' (collection: %s, topic: %s, filter: %s)",
-        payload.top_k,
-        current_user.username,
-        payload.collection,
-        payload.topic,
-        payload.filter.conditions if payload.filter else None,
-    )
-    results = await retrieve_embeddings(
-        client, current_user.username, payload.query_embedding, payload.top_k,
-        collection=payload.collection, topic=payload.topic, metadata_filter=payload.filter,
-    )
-    logger.info("Returned %d results for user '%s'", len(results), current_user.username)
-    return RetrieveResponse(
-        user_id=current_user.username, top_k=payload.top_k, results=results
+    return HealthResponse(
+        status="ok",
+        version=__version__,
+        qdrant=qdrant_status,
+        cross_encoder=reranking.is_available(),
     )
 
 
-
-@app.post("/v1/rerank", response_model=RerankResponse)
-async def rerank(
-    payload: RerankRequest,
-    client: AsyncQdrantClient = Depends(get_qdrant_client),
-    current_user: UserContext = Depends(get_current_user),
-) -> RerankResponse:
-    if payload.method not in {"mmr", "cosine_rescore"}:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported rerank method '{payload.method}'. Use 'mmr' or 'cosine_rescore'.",
-        )
-
-    logger.info(
-        "Reranking for user '%s' (collection: %s, topic: %s, method: %s, fetch_k: %d, top_k: %d)",
-        current_user.username,
-        payload.collection,
-        payload.topic,
-        payload.method,
-        payload.fetch_k,
-        payload.top_k,
-    )
-    candidates = await fetch_candidates(
-        client, current_user.username, payload.query_embedding, payload.fetch_k,
-        collection=payload.collection, topic=payload.topic, metadata_filter=payload.filter,
-    )
-
-    if payload.method == "mmr":
-        reranked = mmr_rerank(candidates, payload.query_embedding, payload.top_k, payload.lambda_)
-    else:
-        reranked = candidates[: payload.top_k]
-        for item in reranked:
-            item.pop("embedding", None)
-
-    results = [ResultItem(**item) for item in reranked]
-    logger.info(
-        "Reranked %d -> %d results for user '%s'",
-        len(candidates),
-        len(results),
-        current_user.username,
-    )
-    return RerankResponse(
-        user_id=current_user.username,
-        method=payload.method,
-        top_k=payload.top_k,
-        fetch_k=payload.fetch_k,
-        results=results,
-    )
+app.include_router(v1_router)

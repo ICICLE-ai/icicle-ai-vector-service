@@ -28,8 +28,14 @@ qdrant_storage/
 # Test / scratch scripts
 testing_tapis_llm.py
 test_e2e.py
-
+test_e2e_benchmark.py
 
 # Agents
 agent.md
 agents.md
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+benchmark/

@@ -1,6 +1,8 @@
 # ICICLE AI Vector Service
 
-FastAPI + Qdrant vector storage and retrieval service for the **ICICLE AI** Tapis tenant. Clients provide their own pre-computed embeddings — the service handles storage, search, and reranking.
+FastAPI + Qdrant vector storage and retrieval service for the **ICICLE AI** Tapis tenant. Clients provide their own pre-computed embeddings — the service handles storage, filtered search, and reranking.
+
+Every request is authenticated with a Tapis access token, and `user_id` is taken from the token's `tapis/username` claim — never from the request body. Collections are physically shared, but every read, write, search and delete is filtered by `user_id`, so users never see or affect each other's data.
 
 **Tags:** `AI4CI` `Software`
 
@@ -59,6 +61,20 @@ cp .env.example .env
 | `TAPIS_JWKS_URL`  | yes      | JWKS endpoint for token signature verification                 |
 | `TAPIS_TENANT_ID` | yes      | Allowed Tapis tenant (`icicleai`)                              |
 | `ALLOWED_ORIGINS` | no       | JSON array of CORS origins. Defaults to `["*"]` (allow all).   |
+| `DROP_EMPTY_COLLECTIONS` | no | `true` lets an emptied collection be dropped. Defaults to `false`; see [How User Isolation Works](#how-user-isolation-works). |
+
+**Cross-encoder reranking** (all optional — the service runs fine without them):
+
+
+| Variable                 | Default                                                          | Description                                                            |
+| ------------------------ | ---------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `RERANK_MODEL`           | `BAAI/bge-reranker-base`                                         | Model used when a request does not name one                            |
+| `RERANK_ALLOWED_MODELS`  | `["BAAI/bge-reranker-base","cross-encoder/ms-marco-MiniLM-L-6-v2"]` | JSON array. A request may only select a model from this list           |
+| `RERANK_PRELOAD`         | `false`                                                          | Load the default model at startup instead of on first use              |
+| `RERANK_THREADS`         | `0`                                                              | Torch intra-op threads. `0` = let torch decide from the cgroup         |
+| `RERANK_MAX_CANDIDATES`  | `128`                                                            | Hard cap on candidates scored per request                              |
+| `RERANK_MAX_LENGTH`      | `512`                                                            | Token truncation length for each (query, passage) pair                 |
+
 
 
 ### Step 3: Install and Run
@@ -74,8 +90,23 @@ uvicorn src.app.main:app --reload --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://localhost:8000/healthz
-# {"status": "ok"}
+# {"status":"ok","version":"1.0.0","qdrant":"ok","cross_encoder":true}
 ```
+
+`cross_encoder` reports whether this deployment can do cross-encoder reranking.
+It is `false` when the optional `[rerank]` extra was not installed — everything
+else still works.
+
+### Step 5 (optional): Enable cross-encoder reranking
+
+Cross-encoder reranking needs PyTorch, which is not installed by default:
+
+```bash
+uv pip install -e ".[rerank]" --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+The CPU wheel index matters: the default PyPI `torch` wheel bundles roughly
+2.5GB of CUDA libraries that are dead weight on a CPU-only deployment.
 
 ---
 
@@ -282,7 +313,26 @@ Returns `404` if the embedding is not found in the specified collection.
 
 ## How to Rerank Results
 
-Rerank search results using MMR (diversity + relevance) or cosine rescoring:
+Reranking fetches a wider shortlist (`fetch_k`) from the vector index, then
+reorders it down to `top_k`. Three methods are available — ask the service which
+ones this deployment actually supports:
+
+```bash
+curl http://localhost:8000/v1/rerank/methods -H "X-Tapis-Token: $TAPIS_TOKEN"
+```
+
+
+| Method           | Reads passage text? | Needs `query_text`? | What it does                                                                  |
+| ---------------- | ------------------- | ------------------- | ----------------------------------------------------------------------------- |
+| `mmr`            | no                  | no                  | Trades relevance for diversity so near-duplicates don't fill the results       |
+| `cosine_rescore` | no                  | no                  | Recomputes exact cosine similarity and re-sorts                                |
+| `cross_encoder`  | **yes**             | **yes**             | Scores the real query against each passage with a transformer — true relevance |
+
+Every response item carries both `score` (the original vector similarity) and
+`rerank_score` (what the ordering is based on), so you can see what the reranker
+changed.
+
+### MMR — diversity
 
 ```bash
 curl -X POST http://localhost:8000/v1/rerank \
@@ -299,27 +349,304 @@ curl -X POST http://localhost:8000/v1/rerank \
   }'
 ```
 
+`lambda` is the trade-off: `1.0` is pure relevance (identical to the plain
+vector ranking), `0.0` is pure diversity. Note MMR deliberately *gives up* some
+relevance — it is for de-duplicating results, not for improving them.
+
+### Cross-encoder — relevance
+
+This is the only method that judges whether a passage actually answers the
+query. It requires `query_text`, the raw query string:
+
+```bash
+curl -X POST http://localhost:8000/v1/rerank \
+  -H "X-Tapis-Token: $TAPIS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query_embedding": [0.12, -0.34, ...],
+    "query_text": "What is the capital of France?",
+    "top_k": 5,
+    "fetch_k": 50,
+    "method": "cross_encoder",
+    "collection": "facts"
+  }'
+```
+
 Response (`200`):
 
 ```json
 {
   "user_id": "thevyasamit",
-  "method": "mmr",
+  "method": "cross_encoder",
+  "model": "BAAI/bge-reranker-base",
   "top_k": 5,
   "fetch_k": 50,
   "results": [
     {
       "id": "xyz-456",
-      "score": 0.91,
-      "collection": "chemistry",
-      "topic": "organic",
+      "score": 0.9848,
+      "rerank_score": 0.9998,
+      "collection": "facts",
+      "topic": null,
       "text": null,
-      "chunks": ["Covalent bonds form when atoms share electrons..."],
-      "metadata": {"source": "chem_101.pdf"}
+      "chunks": ["Paris is the capital and most populous city of France."],
+      "metadata": {}
     }
   ]
 }
 ```
+
+#### Why it helps
+
+A bi-encoder turns the query and each passage into a vector *independently*,
+then compares them once. Anything the vector failed to capture is gone before
+the comparison happens. A cross-encoder feeds the pair through a transformer
+*together*, so every query token attends to every passage token.
+
+A measured example from this repo's test suite — the query is "What is the
+capital of France?":
+
+```
+  pure vector ranking            cross-encoder reranking
+  1. 0.9939  Eiffel Tower...     1. +7.61  Paris is the capital of France.
+  2. 0.9848  Paris is the...     2. -2.95  Berlin is the capital of Germany.
+  3. 0.9701  Berlin is the...    3. -7.98  Eiffel Tower...
+```
+
+The vector ranking put the Eiffel Tower first — it is lexically about Paris,
+but it does not answer the question. The cross-encoder fixed it.
+
+#### Choosing a model
+
+Pass `rerank_model` to pick per request (it must be in `RERANK_ALLOWED_MODELS`),
+or set `RERANK_MODEL` to change the default:
+
+```json
+{
+  "query_embedding": [0.12, -0.34, "..."],
+  "query_text": "How do plants turn sunlight into energy?",
+  "method": "cross_encoder",
+  "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+  "collection": "biology",
+  "top_k": 5,
+  "fetch_k": 50
+}
+```
+
+
+| Model                                  | Params | RAM    | 50 candidates | Languages                     |
+| -------------------------------------- | ------ | ------ | ------------- | ----------------------------- |
+| `BAAI/bge-reranker-base` *(default)*   | 278M   | ~1.5GB | ~1.2s         | Multilingual (100+ languages) |
+| `cross-encoder/ms-marco-MiniLM-L-6-v2` | 23M    | ~0.3GB | ~0.2s         | **English only**              |
+
+> **MiniLM is English-only — this is a hard limitation, not a preference.** It is
+> a MiniLM cross-encoder trained solely on the MS MARCO passage corpus, which is
+> English. Its tokenizer and training data have no meaningful coverage of other
+> languages, so on non-English text it returns confident, meaningless scores
+> rather than an obvious error. Use it when your corpus and queries are English
+> and you want the ~6x speedup; use `bge-reranker-base` (trained multilingually
+> on XLM-RoBERTa) for anything else, including mixed-language collections.
+
+Latency measured on 6 CPU threads with ~400-token passages; scales roughly
+linearly with `fetch_k`. Both models fit comfortably in a 10GB / 10-core pod,
+and both can be loaded at once.
+
+Operational notes:
+
+- **Weights download on first use** (~1.1GB for bge, ~90MB for MiniLM). The first
+  request after a pod restart pays that cost. Set `RERANK_PRELOAD=true` to load
+  during startup instead, or mount a volume at `$HF_HOME` to cache across restarts.
+- **`rerank_score` is not comparable across models.** `bge-reranker-base` emits
+  sigmoid-normalised scores in `[0, 1]`; MiniLM emits raw logits, typically
+  `[-11, +11]`. Compare scores only within one response.
+- **Inference runs in a worker thread**, so a slow rerank never blocks other
+  requests on the pod.
+- `fetch_k` above `RERANK_MAX_CANDIDATES` (default 128) is truncated to the
+  best-scoring candidates rather than rejected.
+
+## How to List Your Collections
+
+Returns only collections you have embeddings in, with counts scoped to you:
+
+```bash
+curl http://localhost:8000/v1/collections -H "X-Tapis-Token: $TAPIS_TOKEN"
+```
+
+Response (`200`):
+
+```json
+{
+  "user_id": "thevyasamit",
+  "count": 2,
+  "collections": [
+    {
+      "collection": "biology",
+      "points": 42,
+      "topics": ["human", "plant"],
+      "vector_dim": 768,
+      "embedding_models": ["gemini-embedding-001"]
+    },
+    {
+      "collection": "chemistry",
+      "points": 17,
+      "topics": ["organic"],
+      "vector_dim": 768,
+      "embedding_models": ["gemini-embedding-001"]
+    }
+  ]
+}
+```
+
+Stats for one collection, and a paginated listing of the embeddings inside it:
+
+```bash
+curl http://localhost:8000/v1/collections/biology -H "X-Tapis-Token: $TAPIS_TOKEN"
+
+curl "http://localhost:8000/v1/collections/biology/embeddings?limit=50&topic=plant" \
+  -H "X-Tapis-Token: $TAPIS_TOKEN"
+```
+
+The embeddings listing is cursor-paginated — pass the returned `next_offset`
+back as `?offset=` to get the next page. It returns metadata only, never vectors.
+
+## How to Delete in Bulk
+
+### Delete everything you own in one collection
+
+```bash
+curl -X DELETE http://localhost:8000/v1/collections/biology \
+  -H "X-Tapis-Token: $TAPIS_TOKEN"
+```
+
+```json
+{
+  "user_id": "thevyasamit",
+  "collection": "biology",
+  "deleted": 42,
+  "collection_dropped": false
+}
+```
+
+Only **your** points are removed. `collection_dropped` is `true` only when no
+points from any user were left, in which case the Qdrant collection itself is
+deleted. Another user's data in the same collection is never touched.
+
+### Delete a selected subset
+
+`POST /v1/embeddings/bulk-delete` takes a selector in the body — explicit ids,
+or a topic/metadata predicate. (It is a POST because DELETE cannot carry a
+request body portably.)
+
+By id:
+
+```bash
+curl -X POST http://localhost:8000/v1/embeddings/bulk-delete \
+  -H "X-Tapis-Token: $TAPIS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"collection": "biology", "ids": ["abc-123", "def-456"]}'
+```
+
+By topic or metadata:
+
+```bash
+curl -X POST http://localhost:8000/v1/embeddings/bulk-delete \
+  -H "X-Tapis-Token: $TAPIS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "collection": "biology",
+    "topic": "plant",
+    "filter": {"conditions": {"source": "old_notes.pdf"}}
+  }'
+```
+
+Everything in the collection:
+
+```bash
+curl -X POST http://localhost:8000/v1/embeddings/bulk-delete \
+  -H "X-Tapis-Token: $TAPIS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"collection": "biology", "all": true}'
+```
+
+Ids you do not own are silently skipped — they are not found, so they are not
+deleted, and `deleted` reflects only what was actually removed.
+
+### Delete everything, everywhere
+
+```bash
+curl -X DELETE "http://localhost:8000/v1/collections?confirm=true" \
+  -H "X-Tapis-Token: $TAPIS_TOKEN"
+```
+
+```json
+{
+  "user_id": "thevyasamit",
+  "deleted": 59,
+  "collections_affected": ["biology", "chemistry"],
+  "collections_dropped": ["chemistry"]
+}
+```
+
+Irreversible. `?confirm=true` is required — without it the request returns `400`,
+so a stray `DELETE /v1/collections` cannot wipe your account by accident.
+
+## How to Run the Tests
+
+```bash
+uv pip install -e ".[rerank,dev]" --extra-index-url https://download.pytorch.org/whl/cpu
+pytest -q
+```
+
+The suite is hermetic — it runs against an in-memory Qdrant with a stubbed
+current-user dependency, so it needs no Qdrant server, no Tapis token and no
+network (beyond a one-time model download for the cross-encoder tests).
+
+Without the `[rerank]` extra the cross-encoder tests skip and the rest still
+pass, which is exactly the slim-install configuration the service supports.
+
+
+The layout mirrors the source tree: `tests/unit/` covers modules in isolation,
+`tests/v1/` drives the HTTP API end to end.
+
+```
+tests/
+├── conftest.py                      in-memory Qdrant + switchable current user
+├── unit/
+│   ├── test_filters.py              the tenancy invariant, asserted directly
+│   ├── test_security.py             token validation and every rejection path
+│   ├── test_schemas.py              request validation
+│   ├── test_vector_reranking.py     mmr and cosine_rescore maths
+│   ├── test_cross_encoder.py        allowlist, candidate cap, dispatch (model stubbed)
+│   ├── test_repository_helpers.py   slugs, projections, facet fallback
+│   └── test_startup.py              lifespan, shared client, failure handling
+└── v1/
+    ├── test_isolation.py            ◄ the security boundary, end to end
+    ├── test_embeddings.py           CRUD
+    ├── test_collections.py          listing, pagination, bulk delete, purge
+    ├── test_search.py               retrieve and filtering
+    ├── test_rerank.py               all three methods through the API
+    ├── test_health.py               the probe
+    └── test_settings_behaviour.py   behaviour that changes with configuration
+```
+
+Coverage is enforced: `pytest --cov` fails below the floor set in
+`pyproject.toml`, and CI runs it that way. The uncovered remainder is code that
+only executes when torch is absent, or that wraps a live network call.
+
+```bash
+pytest -q --cov          # with coverage, as CI runs it
+pytest tests/v1 -q       # just the API suite
+pytest tests/unit -q     # just the unit suite (no model download)
+```
+
+After changing any route or schema, regenerate the committed spec:
+
+```bash
+python scripts/export_openapi.py
+```
+
+CI runs `--check` on that script and fails if `openapi.json` has drifted from
+the app.
 
 ## Troubleshooting
 
@@ -327,6 +654,12 @@ Response (`200`):
 - **401/403 errors**: Ensure your Tapis token is fresh, from the `icicleai` tenant, and passed via the `X-Tapis-Token` header.
 - **Dimension mismatch**: The `embedding` array length must match the collection's dimension (set by the first embedding stored in that collection).
 - **"collection is required"**: All retrieve/rerank requests must specify which collection to query.
+- **`503` on `method="cross_encoder"`**: the optional `[rerank]` extra is not installed in this deployment. Install it (see Quickstart Step 5) or use `mmr` / `cosine_rescore`. `GET /healthz` reports `cross_encoder: false` in this case.
+- **First cross-encoder request is slow (10–20s)**: the model weights are being downloaded and loaded. Subsequent requests are fast. Set `RERANK_PRELOAD=true` to pay this during startup, or mount a volume at `$HF_HOME` so the download survives pod restarts.
+- **`400` "Reranker model is not allowed"**: `rerank_model` must be one of `RERANK_ALLOWED_MODELS`. Check `GET /v1/rerank/methods` for the current list.
+- **Cross-encoder scores look strange on non-English text**: `ms-marco-MiniLM-L-6-v2` is English-only and returns meaningless scores rather than an error on other languages. Use `BAAI/bge-reranker-base`.
+- **Deleted a collection but it still exists**: expected when another user still has points in it. `collection_dropped: false` means only your points were removed.
+- **App exits at startup with a pydantic `extra_forbidden` error**: an older release rejected unknown keys in `.env`. As of v1.0.0 unknown keys are ignored, so stale entries like `VECTOR_DIM` are harmless.
 
 ---
 
@@ -417,8 +750,32 @@ Response (`200`):
 | **Similarity metric**       | **Cosine Similarity**                                                                                            | Measures the angle between two vectors. Score of 1.0 = identical direction, 0.0 = orthogonal. Configured per collection via `Distance.COSINE`.                                                           |
 | **Retrieve**                | HNSW + Cosine                                                                                                    | Finds the `top_k` most similar vectors to the query embedding using the HNSW index with cosine distance. Payload filters (`user_id`, `topic`, `metadata`) are applied during the search, not after.      |
 | **Rerank (MMR)**            | [Maximal Marginal Relevance](https://www.cs.cmu.edu/~jgc/publication/The_Use_MMR_Diversity_Based_LTMIR_1998.pdf) | Balances **relevance** (similarity to query) with **diversity** (dissimilarity between selected results). The `lambda` parameter controls the trade-off: `1.0` = pure relevance, `0.0` = pure diversity. |
-| **Rerank (cosine_rescore)** | Cosine re-scoring                                                                                                | Simply re-sorts the fetched candidates by cosine similarity score and returns the top_k.                                                                                                                 |
+| **Rerank (cosine_rescore)** | Cosine re-scoring                                                                                                | Recomputes the exact cosine similarity over the fetched vectors and re-sorts. Qdrant's HNSW search is *approximate*, so this can correct near-ties the ANN traversal ordered slightly wrong.             |
+| **Rerank (cross_encoder)**  | [Cross-encoder](https://www.sbert.net/examples/applications/cross-encoder/README.html) re-ranking                | Feeds `(query_text, passage_text)` through a transformer **together**, so every query token attends to every passage token. The only method that judges true relevance rather than vector geometry.      |
 
+
+### Bi-encoder vs. Cross-encoder
+
+Everything Qdrant does is *bi-encoder* retrieval, and reranking with `mmr` or
+`cosine_rescore` stays inside that world:
+
+```
+  BI-ENCODER (retrieve, mmr, cosine_rescore)      CROSS-ENCODER (cross_encoder)
+
+  query ──> [encoder] ──> vector ─┐               query ──┐
+                                  ├─> cosine               ├─> [transformer] ─> relevance
+  passage ─> [encoder] ──> vector ┘               passage ─┘
+
+  Encoded separately, compared once.              Encoded together, every query token
+  Passage vectors precomputed at ingest,          attends to every passage token. Nothing
+  so search is an index lookup: fast.             is precomputable: one forward pass per
+  Anything the vector lost is lost                candidate, so it only runs over the
+  before the comparison happens.                  shortlist retrieval already narrowed.
+```
+
+This is why the two stages compose rather than compete: the bi-encoder cheaply
+narrows millions of vectors to ~50 candidates, and the cross-encoder spends real
+compute ordering just those.
 
 ### Search Flow
 
@@ -429,14 +786,137 @@ Response (`200`):
                          within collection)     + metadata filters
                               |
                               v
-                    Optional: Rerank
-                    ┌─────────────────────────┐
-                    │  MMR: fetch_k=50        │
-                    │  Select top_k=5 that    │
-                    │  maximize relevance +   │
-                    │  diversity              │
-                    └─────────────────────────┘
+                    Optional: Rerank (fetch_k=50 -> top_k=5)
+                    ┌──────────────────────────────────────────┐
+                    │ mmr             relevance + diversity    │
+                    │ cosine_rescore  exact cosine re-sort     │
+                    │ cross_encoder   query_text x passage     │
+                    │                 text through a model     │
+                    └──────────────────────────────────────────┘
 ```
+
+## Project Layout
+
+Four layers, each depending only on the ones above it. Nothing under `api/`
+imports `qdrant_client` directly — all storage goes through the repository, so
+there is exactly one place where user scoping could be got wrong.
+
+```
+src/app/
+├── main.py                  app wiring: CORS, lifespan, /healthz, mounts /v1
+│
+├── core/                    cross-cutting; knows nothing about HTTP or Qdrant
+│   ├── settings.py          env-backed configuration
+│   └── security.py          Tapis JWT -> UserContext (the only identity source)
+│
+├── schemas/                 request/response models, one module per resource
+│   ├── common.py            MetadataFilter, HealthResponse
+│   ├── embeddings.py        create/update/bulk-delete
+│   ├── collections.py       listing, purge
+│   └── search.py            retrieve, rerank
+│
+├── db/                      all persistence
+│   ├── client.py            the shared AsyncQdrantClient
+│   ├── filters.py           ◄ THE TENANCY BOUNDARY — every filter is built here
+│   └── repository.py        every read and write, each scoped through filters
+│
+├── reranking/               result reordering
+│   ├── __init__.py          rerank() dispatch
+│   ├── vector.py            mmr, cosine_rescore (pure math, no model)
+│   └── cross_encoder.py     cross_encoder (optional transformer)
+│
+└── api/v1/                  HTTP only: auth, logging, response shaping
+    ├── __init__.py          declares the /v1 prefix
+    ├── embeddings.py        /v1/embeddings/*
+    ├── collections.py       /v1/collections/*
+    └── search.py            /v1/retrieve, /v1/rerank
+```
+
+### Why the `__init__.py` files
+
+One per package — that is simply how Python marks a directory as importable, so
+the count tracks the number of packages, not any redundancy. None of them are
+empty filler: each one declares what its package exports, so callers can write
+`from ..schemas import EmbeddingRecord` without knowing which module a model
+lives in, and `reranking/__init__.py` additionally holds the `rerank()` dispatch
+function.
+
+`__pycache__/` directories are CPython's compiled-bytecode cache. Python writes
+them automatically next to any module it imports, they are regenerated whenever
+a source file changes, and they are already in `.gitignore`, so none of them are
+committed. Deleting them is always safe — Python just rebuilds them on the next
+import. To clear them:
+
+```bash
+find . -name __pycache__ -type d -prune -exec rm -rf {} +
+```
+
+## How User Isolation Works
+
+Qdrant collections are physically shared between users. Isolation is therefore
+not a storage boundary but a filter that must be applied on *every* operation —
+so the service applies it in exactly one place.
+
+```
+  Request ──> Tapis JWT ──> username ──> db/filters.py ──> Qdrant
+              (core/security)            builds every
+                                         filter, always
+                                         pinning user_id
+```
+
+**Identity comes only from the signed token.** `user_id` is read from the
+`tapis/username` claim. It is never taken from a request body, query string or
+header, so a client cannot act as another user by asking to — a `user_id` key in
+a store or update body is simply ignored, and the stored payload always carries
+the caller's own name.
+
+**Every query is scoped by construction.** `db/filters.py` is the only module
+that builds Qdrant filters, and every function it exposes returns a filter with
+`user_id` pinned in `must`. Client-supplied conditions are only ever *appended*
+to `must` (logical AND), and never placed in `should` or `must_not`, so extra
+conditions can only narrow a result set — never widen it past the caller's own
+data.
+
+**Metadata filters cannot escape.** Filter keys are namespaced under `metadata.`
+before reaching Qdrant, so `{"conditions": {"user_id": "someone-else"}}` looks
+for `metadata.user_id` and matches nothing.
+
+**Deleting by id is filtered, not trusted.** Bulk delete ANDs `HasIdCondition`
+with the owner condition rather than deleting the given ids outright, so an id
+belonging to another user matches nothing instead of being removed.
+
+**Collections are never dropped out from under another user.** Deleting "a
+collection" removes only the caller's points. Dropping the emptied Qdrant
+collection is **off by default** (`DROP_EMPTY_COLLECTIONS`): checking "is it
+empty?" and dropping it are two separate round trips, and another user writing
+their first point into that window would lose data that had just been written
+successfully. Nothing the service can do makes that pair atomic, so the default
+is to leave the empty collection in place. Even with the setting enabled, a
+collection holding another user's points is never dropped.
+
+**Existence is not observable.** Asking about a collection you own nothing in
+returns `404` with the same message as a collection that does not exist, across
+every endpoint — otherwise status codes alone would let one user enumerate
+another's collection names.
+
+**One user cannot monopolise the pod.** `RERANK_MAX_CANDIDATES` caps how many
+candidates a single cross-encoder request may score, so a large `fetch_k` cannot
+occupy the CPU indefinitely and slow everyone else down.
+
+`tests/v1/test_isolation.py` asserts each of these end to end, and
+`tests/unit/test_filters.py` asserts the filter invariant directly. Several
+tests pair a negative assertion with a positive control (for example, a mixed
+batch of ids must delete exactly one of two) so that a filter which silently
+matched nothing would fail rather than pass.
+
+### Known limitation: shared collection dimensions
+
+A collection's vector dimension is fixed by whoever stores the first embedding
+in it. Because the collection namespace is shared, if one user creates
+`biology` with a 768-dimensional model, another user cannot store
+1024-dimensional vectors under that same name — the request is rejected with
+`409` and an explanation. No data is exposed or lost, but the name is taken.
+Use a distinct collection name per embedding model if that matters to you.
 
 ## Design Decisions
 
@@ -448,6 +928,14 @@ Response (`200`):
 - **Metadata filtering at search time**: Qdrant applies payload filters during the HNSW traversal (not as a post-filter), so filtered searches remain efficient even on large collections.
 - **Auth boundary**: JWKS-validated Tapis JWTs are the sole security gate. CORS is open by default (`*`) since the token is what matters, not the origin.
 - **Update/Delete require collection**: Since Qdrant doesn't support global ID lookups across collections, the `collection` query param is required on update/delete to enable a direct O(1) lookup by embedding ID.
+- **Deletes are scoped; collections are not dropped by default**: `DELETE /v1/collections/{collection}` removes only the caller's points. Dropping the emptied Qdrant collection is opt-in via `DROP_EMPTY_COLLECTIONS` because the emptiness check and the drop cannot be made atomic — see [How User Isolation Works](#how-user-isolation-works).
+- **The collection namespace is isolated too**: `GET /v1/collections` lists only collections the caller owns points in, and all counts and topic lists are filtered by `user_id`. Users do not learn which collections other users created.
+- **Bulk delete filters on `user_id`, including by id**: the by-id path ANDs `HasIdCondition` with the caller's `user_id` rather than deleting the ids outright, so passing another user's point id deletes nothing instead of succeeding.
+- **Purge is opt-in**: `DELETE /v1/collections` requires `?confirm=true`, so an unqualified DELETE against the collection root cannot wipe an account.
+- **Tenant-aware payload indexes**: `user_id`, `topic` and `embedding_model` get keyword indexes when a collection is created, and `user_id` is declared with `is_tenant=True` — Qdrant's documented multi-tenant layout, which groups each user's points together on disk. Without an index Qdrant does a full payload scan during HNSW traversal, which degrades badly as collections grow. Collections created before v1.0.0 are backfilled on startup, since creating an existing index is a no-op.
+- **Reranking is optional and swappable**: the cross-encoder lives behind an optional `[rerank]` extra. Without it the service runs unchanged and only `method="cross_encoder"` returns `503`. Models are restricted to an allowlist so a client cannot make the pod download arbitrary weights.
+- **Versioned router package**: endpoints live in `src/app/api/v1/`, with the `/v1` prefix declared in exactly one place (`api/v1/__init__.py`). Adding a v2 means a sibling package, not edits spread across handlers.
+- **Layered, not flat**: configuration, schemas, persistence and reranking are separate packages rather than loose modules beside `main.py`. The point is the dependency direction — `api/` may import `db/`, never the reverse — which is what keeps the tenancy filter impossible to bypass from a handler.
 
 > **Data storage notice:** Text chunks, metadata, and embeddings are stored **as-is** in Qdrant without encryption at rest. The service relies on JWT-based user isolation and network-level security (internal pod-to-pod communication) to protect data. If your use case requires encryption at rest, configure it at the Qdrant storage layer or the underlying volume/disk level.
 
@@ -460,14 +948,25 @@ Response (`200`):
 All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 
 
-| Method   | Endpoint                          | Description                              |
-| -------- | --------------------------------- | ---------------------------------------- |
-| `GET`    | `/healthz`                        | Health check (no auth)                   |
-| `POST`   | `/v1/embeddings`                  | Store a pre-computed embedding           |
-| `PUT`    | `/v1/embeddings/{id}?collection=` | Partial update of an embedding           |
-| `DELETE` | `/v1/embeddings/{id}?collection=` | Delete an embedding                      |
-| `POST`   | `/v1/retrieve`                    | Vector similarity search                 |
-| `POST`   | `/v1/rerank`                      | Rerank results (MMR or cosine rescoring) |
+| Method   | Endpoint                                     | Description                                             |
+| -------- | -------------------------------------------- | ------------------------------------------------------- |
+| `GET`    | `/healthz`                                   | Health check (no auth)                                  |
+| `POST`   | `/v1/embeddings`                             | Store a pre-computed embedding                          |
+| `GET`    | `/v1/embeddings/{id}?collection=`            | Get one embedding's metadata                            |
+| `PUT`    | `/v1/embeddings/{id}?collection=`            | Partial update of an embedding                          |
+| `DELETE` | `/v1/embeddings/{id}?collection=`            | Delete one embedding                                    |
+| `POST`   | `/v1/embeddings/bulk-delete`                 | Delete many by ids, topic/metadata predicate, or all    |
+| `GET`    | `/v1/collections`                            | List your collections with per-user counts and topics   |
+| `DELETE` | `/v1/collections?confirm=true`               | Delete **all** your embeddings across every collection  |
+| `GET`    | `/v1/collections/{collection}`               | Stats for one collection                                |
+| `GET`    | `/v1/collections/{collection}/embeddings`    | Paginated listing of your embeddings in a collection    |
+| `DELETE` | `/v1/collections/{collection}`               | Delete your embeddings in one collection                |
+| `POST`   | `/v1/retrieve`                               | Vector similarity search                                |
+| `POST`   | `/v1/rerank`                                 | Rerank results (MMR, cosine rescore, or cross-encoder)  |
+| `GET`    | `/v1/rerank/methods`                         | Which rerank methods and models this deployment offers  |
+
+Interactive docs are served at `/docs`; the committed [`openapi.json`](openapi.json)
+is the same spec, for client generation.
 
 
 ## Request Fields
@@ -507,7 +1006,9 @@ All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 | `collection`      | yes      | Which collection to search                                    |
 | `top_k`           | no       | Final number of results (default 10, max 100)                 |
 | `fetch_k`         | no       | Candidates to fetch before reranking (default 50, max 500)    |
-| `method`          | no       | `"mmr"` (default) or `"cosine_rescore"`                       |
+| `method`          | no       | `"mmr"` (default), `"cosine_rescore"` or `"cross_encoder"`    |
+| `query_text`      | cond.    | The raw query string. **Required** when `method="cross_encoder"`; ignored otherwise |
+| `rerank_model`    | no       | Cross-encoder to use; must be in `RERANK_ALLOWED_MODELS`. Defaults to `RERANK_MODEL` |
 | `lambda`          | no       | MMR trade-off: 1.0 = relevance, 0.0 = diversity (default 0.7) |
 | `topic`           | no       | Narrow results to a specific sub-category                     |
 | `filter`          | no       | Metadata filter                                               |
@@ -533,5 +1034,40 @@ All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 | Field                      | Required | Description                               |
 | -------------------------- | -------- | ----------------------------------------- |
 | `collection` (query param) | yes      | Which collection the embedding belongs to |
+
+
+### Bulk delete (`POST /v1/embeddings/bulk-delete`)
+
+Exactly one selector: `ids`, or a `topic`/`filter` predicate, or `all`.
+
+
+| Field        | Required | Description                                                            |
+| ------------ | -------- | ----------------------------------------------------------------------- |
+| `collection` | yes      | Which collection to delete from                                        |
+| `ids`        | one of   | Explicit embedding ids. Ids you don't own are skipped                  |
+| `topic`      | one of   | Delete everything you own with this topic                              |
+| `filter`     | one of   | Metadata predicate, combinable with `topic`                            |
+| `all`        | one of   | `true` deletes everything you own in the collection. Cannot be combined |
+
+Returns `{ "deleted": <int>, "collection_dropped": <bool> }`. Invalid selector
+combinations return `422`.
+
+
+### List embeddings (`GET /v1/collections/{collection}/embeddings`)
+
+
+| Query param | Required | Description                                                  |
+| ----------- | -------- | ------------------------------------------------------------- |
+| `limit`     | no       | Page size, 1–500 (default 50)                                 |
+| `offset`    | no       | Cursor from the previous page's `next_offset`                 |
+| `topic`     | no       | Only embeddings with this topic                               |
+
+
+### Purge (`DELETE /v1/collections`)
+
+
+| Query param | Required | Description                                          |
+| ----------- | -------- | ----------------------------------------------------- |
+| `confirm`   | yes      | Must be `true`. Returns `400` otherwise               |
 
 

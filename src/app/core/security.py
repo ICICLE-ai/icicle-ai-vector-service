@@ -1,3 +1,10 @@
+"""Tapis JWT validation.
+
+The username extracted here is the *only* identity the rest of the service
+trusts. It is never read from a request body, query string or header other than
+the signed token, so a client cannot act as another user by asking to.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -6,15 +13,21 @@ from functools import lru_cache
 from typing import Any
 
 import jwt
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Header, HTTPException, status
 
 from .settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class UserContext:
+    """The authenticated caller.
+
+    Frozen so a route handler cannot accidentally reassign ``username`` partway
+    through a request and widen its own access.
+    """
+
     username: str
     tenant_id: str
     claims: dict[str, Any]

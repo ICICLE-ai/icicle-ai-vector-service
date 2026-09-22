@@ -33,22 +33,31 @@ jobs:
       - name: Install uv
         run: pip install --upgrade uv
 
-      - name: Install project
-        run: uv pip install --system .
+      - name: Install project (with rerank extra)
+        run: |
+          uv pip install --system ".[rerank,dev]" \
+            --extra-index-url https://download.pytorch.org/whl/cpu
 
-      # No pytest suite in this repo (test_e2e.py / testing_tapis_llm.py are live
-      # scripts needing real tokens). Importing every module is a cheap gate that
-      # catches syntax/import breakage. settings.py instantiates Settings() at
-      # import time, so the required env vars must be present; QDRANT_URL can be a
-      # dummy because db._client() is lazy (lru_cache) and never called here.
-      - name: Import smoke check
+      # The suite is hermetic: an in-memory Qdrant and a stubbed current-user
+      # dependency, so it needs no Qdrant server and no Tapis token. The env
+      # vars below only satisfy Settings(), which is built at import time.
+      # Coverage is enforced (fail_under in pyproject), so a drop fails the build.
+      - name: Run tests
+        env:
+          QDRANT_URL: http://localhost:6333
+          TAPIS_ISSUER: https://example.tapis.io/v3/tokens
+          TAPIS_JWKS_URL: https://example.tapis.io/v3/tokens/.well-known/jwks.json
+          TAPIS_TENANT_ID: icicleai
+        run: pytest -q --cov
+
+      - name: Check openapi.json is up to date
         env:
           QDRANT_URL: http://localhost:6333
           TAPIS_ISSUER: https://example.tapis.io/v3/tokens
           TAPIS_JWKS_URL: https://example.tapis.io/v3/tokens/.well-known/jwks.json
           TAPIS_TENANT_ID: icicleai
         run: |
-          python -c "from src.app import auth, crud, db, main, rerank, schemas, settings; print('all imports ok')"
+          python scripts/export_openapi.py --check
 
   build-and-push-images:
     runs-on: ubuntu-latest
@@ -159,11 +168,6 @@ jobs:
     timeout-minutes: 12
 
     steps:
-      # The pod lives in the icicleai tenant, so the API URL is icicleai.tapis.io.
-      # The token (TAPIS_ICICLE_PROD_TOKEN) is a long-lived service token from the TACC
-      # tenant — TACC is the parent tenant in Tapis's hierarchy and is authorized
-      # to manage Pods in child tenants like icicleai. URL == where the resource
-      # lives; token tenant == who the caller is. They don't have to match.
       - name: Restart production Tapis pod
         timeout-minutes: 2
         uses: fjogeleit/http-request-action@v1
