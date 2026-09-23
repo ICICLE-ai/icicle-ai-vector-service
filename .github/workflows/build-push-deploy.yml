@@ -154,9 +154,14 @@ jobs:
           cache-to: type=gha,mode=max
 
       # Checks the built image rather than the repo: that the package imports
-      # under the installed layout, that every expected route registers, and
-      # whether the optional [rerank] extra made it in. A bare import list would
-      # miss a dropped route or a torch-less build.
+      # under the installed layout, that every expected path is served, and
+      # whether the optional [rerank] extra made it in.
+      #
+      # Enumerates paths via app.openapi(), NOT app.routes: since FastAPI 0.141
+      # include_router leaves lazy _IncludedRouter objects in app.routes rather
+      # than flattened APIRoute objects, so introspecting .routes reports zero
+      # mounted routes on a perfectly working app. The OpenAPI schema is what is
+      # actually served and is stable across versions.
       - name: Smoke-test latest image
         run: |
           docker run --rm --entrypoint python \
@@ -165,7 +170,7 @@ jobs:
             -e TAPIS_JWKS_URL="$TAPIS_JWKS_URL" \
             -e TAPIS_TENANT_ID="$TAPIS_TENANT_ID" \
             ${{ env.REGISTRY }}/${{ steps.tags.outputs.image_name }}:latest \
-            -c "from src.app import __version__, reranking; from src.app.main import app; paths = sorted({r.path for r in app.routes if getattr(r, 'methods', None)}); expected = ['/healthz', '/v1/collections', '/v1/collections/{collection}', '/v1/embeddings', '/v1/embeddings/bulk-delete', '/v1/rerank', '/v1/rerank/methods', '/v1/retrieve']; missing = [p for p in expected if p not in paths]; assert not missing, f'missing routes: {missing}'; print(f'v{__version__}: {len(paths)} routes ok, cross_encoder={reranking.is_available()}')"
+            -c "from src.app import __version__, reranking; from src.app.main import app; paths = sorted(app.openapi()['paths']); expected = ['/healthz', '/v1/collections', '/v1/collections/{collection}', '/v1/embeddings', '/v1/embeddings/bulk-delete', '/v1/rerank', '/v1/rerank/methods', '/v1/retrieve']; missing = [p for p in expected if p not in paths]; assert not missing, f'missing routes: {missing} (present: {paths})'; print(f'v{__version__}: {len(paths)} paths ok, cross_encoder={reranking.is_available()}')"
 
       # On a v*.*.* tag push, populate the repo's "Releases" sidebar with an
       # auto-generated changelog (built from PR titles since the previous tag).

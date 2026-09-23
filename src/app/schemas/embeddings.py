@@ -155,12 +155,12 @@ class BulkDeleteRequest(BaseModel):
             return self
         if self.ids and has_predicate:
             raise ValueError("Provide either ids or a topic/filter predicate, not both")
+        # An empty ids list is falsy, so it lands here rather than needing a
+        # check of its own.
         if not self.ids and not has_predicate:
             raise ValueError(
                 "Nothing selected. Provide ids, a topic/filter predicate, or all=true."
             )
-        if self.ids is not None and not self.ids:
-            raise ValueError("ids must not be an empty list")
         return self
 
 

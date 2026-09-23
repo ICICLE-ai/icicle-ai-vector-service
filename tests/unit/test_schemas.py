@@ -55,6 +55,15 @@ class TestEmbeddingCreate:
         with pytest.raises(ValidationError):
             EmbeddingCreate(**body)
 
+    @pytest.mark.parametrize("bad", ["", "   ", "\t"])
+    def test_blank_embedding_model_rejected(self, bad):
+        """Whitespace is not a model name — the field must carry real content."""
+        with pytest.raises(ValidationError, match="embedding_model"):
+            EmbeddingCreate(**self._valid(embedding_model=bad))
+
+    def test_embedding_model_is_trimmed(self):
+        assert EmbeddingCreate(**self._valid(embedding_model="  m  ")).embedding_model == "m"
+
     @pytest.mark.parametrize("bad", [[], ["   "], ["ok", ""]])
     def test_blank_chunks_rejected(self, bad):
         with pytest.raises(ValidationError, match="chunks"):
@@ -157,7 +166,8 @@ class TestBulkDeleteRequest:
             BulkDeleteRequest(collection="c", all=True, **extra)
 
     def test_empty_ids_list_rejected(self):
-        with pytest.raises(ValidationError):
+        """Caught by the "nothing selected" branch, since [] is falsy."""
+        with pytest.raises(ValidationError, match="Nothing selected"):
             BulkDeleteRequest(collection="c", ids=[])
 
     def test_empty_metadata_filter_is_not_a_selector(self):
