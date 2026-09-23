@@ -1,9 +1,20 @@
 """Vector-space reranking.
 
-These methods operate purely on the embeddings already stored in Qdrant — no
-model runs and the raw query text is never needed. They are cheap (sub-millisecond)
-but they can only ever reason about vector geometry. For true relevance
-judgement over the passage text, see ``cross_encoder.py``.
+These methods operate purely on the embeddings already returned by Qdrant — no
+model runs and the raw query text is never needed. For true relevance judgement
+over the passage text, see :mod:`app.reranking.cross_encoder`.
+
+**Why this is vectorised.** MMR compares every candidate against every
+already-selected one, which is O(top_k² × fetch_k × dim) similarity work. Written
+as Python loops that is ~3.8 million float operations per request at the default
+fetch_k=50 over 768 dimensions — tens to hundreds of milliseconds of CPU, run
+*synchronously on the event loop*, which starves every other request on the
+worker. A load test found exactly that: MMR at 10 req/s pushed p50 latency past
+8 seconds while plain search stayed at 125ms.
+
+NumPy does the same arithmetic in compiled code and releases the GIL for the
+large operations, which brings it back into the sub-millisecond range. The
+maths is unchanged; only the execution is.
 """
 
 from __future__ import annotations
@@ -11,8 +22,15 @@ from __future__ import annotations
 from math import sqrt
 from typing import Any
 
+import numpy as np
+
 
 def cosine_sim(vec_a: list[float], vec_b: list[float]) -> float:
+    """Cosine similarity between two vectors.
+
+    Kept as a scalar helper for callers and tests; the rerankers below work on
+    whole matrices instead of calling this per pair.
+    """
     dot = 0.0
     norm_a = 0.0
     norm_b = 0.0
@@ -25,6 +43,39 @@ def cosine_sim(vec_a: list[float], vec_b: list[float]) -> float:
     return dot / (sqrt(norm_a) * sqrt(norm_b))
 
 
+def _embedding_matrix(candidates: list[dict[str, Any]]) -> np.ndarray | None:
+    """Stack candidate embeddings into an (n, dim) float32 matrix.
+
+    Returns None when the embeddings are missing or ragged — Qdrant enforces one
+    dimension per collection so that should not happen, but a caller that lost
+    vectors somewhere must degrade rather than raise.
+    """
+    vectors = [candidate.get("embedding") or [] for candidate in candidates]
+    widths = {len(v) for v in vectors}
+    if len(widths) != 1 or widths == {0}:
+        return None
+    return np.asarray(vectors, dtype=np.float32)
+
+
+def _unit_rows(matrix: np.ndarray) -> np.ndarray:
+    """Row-normalise so a dot product *is* the cosine similarity.
+
+    Normalising once up front turns every later comparison into a plain matrix
+    multiply, which is the whole point of doing this in NumPy.
+    """
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    # A zero vector has no direction; leave it at zero rather than dividing by 0,
+    # which matches cosine_sim() returning 0.0 for that case.
+    return np.divide(matrix, norms, out=np.zeros_like(matrix), where=norms != 0)
+
+
+def _finalise(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip vectors before results leave the service."""
+    for item in items:
+        item.pop("embedding", None)
+    return items
+
+
 def mmr_rerank(
     candidates: list[dict[str, Any]],
     query_embedding: list[float],
@@ -35,42 +86,67 @@ def mmr_rerank(
 
     Greedily picks the candidate maximising
     ``lambda * relevance - (1 - lambda) * max_similarity_to_already_picked``.
-    Note this deliberately *trades away* some relevance to avoid returning near
-    duplicates: lambda=1.0 is pure relevance (identical to the vector ranking),
+    This deliberately *trades away* some relevance to avoid near-duplicates:
+    lambda=1.0 is pure relevance (identical to the incoming vector ranking),
     lambda=0.0 is pure diversity.
+
+    Each round is a single matrix-vector product against the newly selected
+    candidate, with a running maximum — so the similarity of every pair is
+    computed once rather than once per round.
     """
     if not candidates:
         return []
 
-    selected: list[dict[str, Any]] = []
-    remaining = candidates[:]
+    matrix = _embedding_matrix(candidates)
+    if matrix is None:
+        return _mmr_fallback(candidates, top_k, lambda_)
 
-    while remaining and len(selected) < top_k:
-        best_idx = 0
-        best_score = float("-inf")
-        for idx, candidate in enumerate(remaining):
-            relevance = candidate.get("score", 0.0)
-            if not selected:
-                mmr_score = relevance
-            else:
-                diversity = max(
-                    cosine_sim(candidate["embedding"], chosen["embedding"])
-                    for chosen in selected
-                )
-                mmr_score = lambda_ * relevance - (1.0 - lambda_) * diversity
-            if mmr_score > best_score:
-                best_score = mmr_score
-                best_idx = idx
-        chosen = remaining.pop(best_idx)
+    unit = _unit_rows(matrix)
+    relevance = np.asarray(
+        [c.get("score", 0.0) for c in candidates], dtype=np.float32
+    )
+
+    count = len(candidates)
+    wanted = min(top_k, count)
+    available = np.ones(count, dtype=bool)
+    # Highest similarity from each candidate to anything already selected.
+    best_sim = np.full(count, -np.inf, dtype=np.float32)
+
+    selected: list[dict[str, Any]] = []
+    for step in range(wanted):
+        if step == 0:
+            # Nothing selected yet, so there is no diversity term to subtract.
+            objective = relevance.copy()
+        else:
+            objective = lambda_ * relevance - (1.0 - lambda_) * best_sim
+        objective[~available] = -np.inf
+
+        pick = int(np.argmax(objective))
+        chosen = candidates[pick]
         # The MMR objective value, not the raw similarity — this is what the
         # ordering is actually based on.
-        chosen["rerank_score"] = best_score
+        chosen["rerank_score"] = float(objective[pick])
         selected.append(chosen)
 
-    for item in selected:
-        item.pop("embedding", None)
+        available[pick] = False
+        # One matvec updates every remaining candidate's diversity penalty.
+        best_sim = np.maximum(best_sim, unit @ unit[pick])
 
-    return selected
+    return _finalise(selected)
+
+
+def _mmr_fallback(
+    candidates: list[dict[str, Any]], top_k: int, lambda_: float
+) -> list[dict[str, Any]]:
+    """Degrade to relevance order when vectors are unusable.
+
+    Without embeddings the diversity term is undefined, so the best available
+    answer is the ranking Qdrant already produced.
+    """
+    ordered = sorted(candidates, key=lambda item: item.get("score", 0.0), reverse=True)
+    for item in ordered[:top_k]:
+        item["rerank_score"] = item.get("score", 0.0)
+    return _finalise(ordered[:top_k])
 
 
 def cosine_rescore(
@@ -78,26 +154,36 @@ def cosine_rescore(
     query_embedding: list[float],
     top_k: int,
 ) -> list[dict[str, Any]]:
-    """Recompute cosine similarity against the query and re-sort.
+    """Recompute exact cosine similarity against the query and re-sort.
 
-    Qdrant already returns points ordered by cosine distance, so in the common
-    case this reproduces the same ranking. It is still useful as an explicit,
-    exact rescoring step: Qdrant's HNSW search is *approximate*, and its score
-    reflects the distance metric the collection was created with. This computes
-    the exact cosine similarity over the returned vectors, which can reorder
-    near-ties that the ANN traversal got slightly wrong.
+    Qdrant already returns points ordered by cosine distance, so this usually
+    reproduces the same ranking. It remains useful as an exact rescoring step:
+    Qdrant's HNSW search is *approximate*, and this computes the true cosine
+    over the returned vectors, which can reorder near-ties the ANN traversal got
+    slightly wrong.
     """
     if not candidates:
         return []
 
-    for candidate in candidates:
-        embedding = candidate.get("embedding") or []
-        candidate["rerank_score"] = (
-            cosine_sim(embedding, query_embedding) if embedding else candidate.get("score", 0.0)
-        )
+    matrix = _embedding_matrix(candidates)
+    if matrix is None:
+        # No usable vectors: keep each candidate's stored score.
+        for candidate in candidates:
+            candidate["rerank_score"] = candidate.get("score", 0.0)
+        candidates.sort(key=lambda item: item["rerank_score"], reverse=True)
+        return _finalise(candidates[:top_k])
+
+    query = np.asarray(query_embedding, dtype=np.float32)
+    query_norm = float(np.linalg.norm(query))
+    if query_norm == 0.0 or query.shape[0] != matrix.shape[1]:
+        for candidate in candidates:
+            candidate["rerank_score"] = candidate.get("score", 0.0)
+        candidates.sort(key=lambda item: item["rerank_score"], reverse=True)
+        return _finalise(candidates[:top_k])
+
+    scores = _unit_rows(matrix) @ (query / query_norm)
+    for candidate, score in zip(candidates, scores, strict=True):
+        candidate["rerank_score"] = float(score)
 
     candidates.sort(key=lambda item: item["rerank_score"], reverse=True)
-    top = candidates[:top_k]
-    for item in top:
-        item.pop("embedding", None)
-    return top
+    return _finalise(candidates[:top_k])

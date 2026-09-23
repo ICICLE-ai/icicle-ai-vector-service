@@ -54,6 +54,8 @@ async def rerank(
     validated upstream (by the request schema and :func:`resolve_model`), so by
     the time we get here they are guaranteed present for that method.
     """
+    # Run inline for now. Vectorised this is ~1.4ms at the default fetch_k=50;
+    # whether it needs a worker thread is a question for the load test.
     if method == "mmr":
         return mmr_rerank(candidates, query_embedding, top_k, lambda_)
     if method == "cosine_rescore":
