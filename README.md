@@ -2,7 +2,7 @@
 
 FastAPI + Qdrant vector storage and retrieval service for the **ICICLE AI** Tapis tenant. Clients provide their own pre-computed embeddings — the service handles storage, filtered search, and reranking.
 
-Every request is authenticated with a Tapis access token, and `user_id` is taken from the token's `tapis/username` claim — never from the request body. Collections are physically shared, but every read, write, search and delete is filtered by `user_id`, so users never see or affect each other's data.
+Every request is authenticated with a Tapis access token, and `user_id` is taken from the token's `tapis/username` claim — never from the request body. Each user's collections are separate Qdrant collections, so users cannot see or affect each other's data, and each can choose their own embedding model and vector dimension.
 
 **Tags:** `AI4CI` `Software`
 
@@ -854,9 +854,9 @@ find . -name __pycache__ -type d -prune -exec rm -rf {} +
 
 ## How User Isolation Works
 
-Qdrant collections are physically shared between users. Isolation is therefore
-not a storage boundary but a filter that must be applied on *every* operation —
-so the service applies it in exactly one place.
+Each user's collections are physically separate Qdrant collections, so isolation is
+a storage boundary first. A `user_id` filter is applied on every operation as well,
+built in exactly one place, as defence in depth.
 
 ```
   Request ──> Tapis JWT ──> username ──> db/filters.py ──> Qdrant
@@ -910,20 +910,118 @@ tests pair a negative assertion with a positive control (for example, a mixed
 batch of ids must delete exactly one of two) so that a filter which silently
 matched nothing would fail rather than pass.
 
-### Known limitation: shared collection dimensions
+### Dimensions are per collection, not global
 
-A collection's vector dimension is fixed by whoever stores the first embedding
-in it. Because the collection namespace is shared, if one user creates
-`biology` with a 768-dimensional model, another user cannot store
-1024-dimensional vectors under that same name — the request is rejected with
-`409` and an explanation. No data is exposed or lost, but the name is taken.
-Use a distinct collection name per embedding model if that matters to you.
+A collection's vector dimension is fixed by its first embedding and cannot change.
+Because collections are per user, this only ever constrains a user against their own
+earlier choice - two users can hold `biology` at different dimensions, and one user
+can hold `biology` at 768 and `biology-v2` at 1024.
+
+Storing a mismatched width returns `409` with an explanation. To change a
+collection's dimension, delete it and re-ingest.
+
+See [Why Collections Are Per User](#why-collections-are-per-user) for why the service
+is built this way and what it costs.
+
+
+## Why Collections Are Per User
+
+This is the service's most consequential design decision, and it deliberately
+departs from Qdrant's default recommendation. The reasoning is worth stating,
+because the right answer changes with scale.
+
+### What Qdrant recommends
+
+Qdrant's multitenancy guidance is unambiguous:
+
+> "Creating a separate collection for each tenant is rarely the most efficient
+> approach." … "Each collection carries its own resource overhead, so creating many
+> collections can quickly become expensive."
+
+The recommended pattern is a **single collection partitioned by a payload field**,
+with `is_tenant=true` on that field so Qdrant co-locates each tenant's vectors on
+disk. Qdrant Cloud caps a cluster at 1,000 collections by default, which signals
+where they consider the practical boundary.
+
+The same page carves out an exception, and it describes this service:
+
+> "Only create multiple collections when you have a limited number of tenants that
+> need strict isolation."
+
+### Why the exception applies here
+
+**Researchers bring their own embedding models.** A vector collection's dimension is
+fixed by its first embedding and can never change. Under a single shared collection,
+whoever stores first fixes the dimension for *everyone*:
+
+```
+SHARED COLLECTION                         PER-USER COLLECTIONS
+
+embeddings (768d — fixed globally)        alice_9f2a__bio    768d   ✓  Gemini
+  alice, gemini-embedding-001  768d  ✓    bob_1110__bio     1024d   ✓  NVClip
+  bob,   nvidia/nvclip        1024d  ✗    carol_4d81__bio   4096d   ✓  NV-Embed
+  carol, NV-Embed-v1          4096d  ✗
+```
+
+For a general-purpose product that is an acceptable constraint — you pick a model and
+standardise. For a research platform it is not. Users arrive from different domains
+with models already chosen by their science, and a service that forces a single
+embedding model forces a single research methodology.
+
+**Experiments need dimensions side by side.** Comparing two embedding models on the
+same corpus means holding both in the service simultaneously. Under a shared
+collection that is impossible without a second deployment. This repository's own
+benchmark relies on it: `benchmark/scripts/dim_sweep.sh` runs six collections at 768,
+1024, 1536, 2048, 3072 and 4096 dimensions under a single account.
+
+**Isolation is structural, not procedural.** Two users' vectors are never in the same
+index, so a missed filter on some future endpoint cannot leak data — there is nothing
+to leak into. Under a shared collection the payload filter is the only barrier, and
+every new query path must apply it correctly, forever.
+
+**Deleting a user is cheap and complete.** Dropping their collections removes
+everything they own. Under a shared collection it is a filtered delete across an
+index holding everyone else's data.
+
+### What it costs
+
+| | Per-user collections (this service) | Single shared collection |
+| --- | --- | --- |
+| Vector dimension | per user, per collection | one, globally |
+| Isolation | physical | payload filter only |
+| Cost of a missed filter | nothing — wrong data is not present | every user's data |
+| Collections in Qdrant | users × collections each | 1 |
+| Practical ceiling | ~1,000 collections | millions of tenants |
+
+The ceiling is the real cost. At 200 users with 5 collections each you reach 1,000,
+and nothing in the service currently caps collections per user.
+
+### When to revisit
+
+Around **500 collections**, start watching Qdrant's memory. The migration target is
+*not* the pure shared model but a middle ground that keeps what matters:
+
+```
+one collection per DIMENSION, payload-partitioned by user
+
+shared_768   ── all 768-dim users,  isolated by user_id filter
+shared_1024  ── all 1024-dim users
+shared_4096  ── all 4096-dim users
+```
+
+Collection count then depends on how many embedding dimensions exist in practice — a
+handful — rather than on user count. Dimension flexibility survives, Qdrant's
+recommended `is_tenant=true` layout applies, and the 1,000-collection ceiling
+disappears. The trade is that isolation becomes logical again.
+
+Because all naming lives in `db/naming.py` and all filtering in `db/filters.py`,
+that migration means rewriting two small modules, not the service.
 
 ## Design Decisions
 
 - **Collection = broad domain**: Each domain (e.g. `biology`, `chemistry`) gets its own Qdrant collection with its own HNSW index. Similarity search only traverses vectors in the same domain, resulting in higher relevance and faster queries.
 - **Topic = optional sub-category**: Topics (e.g. `human`, `plant`, `organic`) are payload fields within a collection. They allow narrowing search results without creating separate collections. A collection can have embeddings with different topics, or no topic at all.
-- **User isolation via payload filter**: Collections are shared across all users, but every query automatically filters by `user_id` (extracted from the JWT). Users never see each other's data.
+- **User isolation is physical, with a filter as backup**: each user's collections are separate Qdrant collections (see [Why Collections Are Per User](#why-collections-are-per-user)), so two users' vectors are never in the same index. Every query *also* filters by `user_id` from the JWT, which is defence in depth rather than the barrier itself.
 - **No server-side embedding**: Clients provide pre-computed vectors. This keeps the service model-agnostic and lightweight — any embedding model works. The vector dimension is set per collection by the first embedding stored.
 - **Dynamic vector dimensions**: There is no global `VECTOR_DIM` setting. Each collection's dimension is determined by the first embedding stored in it (e.g. 768 for Gemini, 1024 for NVIDIA NVClip, 4096 for NV-Embed-v1). All subsequent embeddings in the same collection must match that dimension — Qdrant enforces this automatically. The `embedding_model` field is required so the model that produced each vector is always tracked.
 - **Metadata filtering at search time**: Qdrant applies payload filters during the HNSW traversal (not as a post-filter), so filtered searches remain efficient even on large collections.

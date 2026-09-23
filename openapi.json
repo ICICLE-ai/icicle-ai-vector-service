@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ICICLE AI Vector Service",
-    "description": "Vector storage and retrieval service for the ICICLE AI tenant. Clients provide\ntheir own pre-computed embeddings; the service handles storage, filtered search\nand reranking.\n\n**Collections** are broad domains (e.g. `biology`, `chemistry`), each backed by\nits own Qdrant collection and HNSW index. **Topics** are optional sub-categories\nwithin a collection (e.g. `human`, `plant`).\n\n**User isolation.** Every request is authenticated with a Tapis access token via\nthe `X-Tapis-Token` header, and `user_id` is taken from the token's\n`tapis/username` claim — never from the request body. Collections are physically\nshared, but every read, write, search and delete is filtered by `user_id`, so\nusers never see or affect each other's data.\n",
+    "description": "Vector storage and retrieval service for the ICICLE AI tenant. Clients provide\ntheir own pre-computed embeddings; the service handles storage, filtered search\nand reranking.\n\n**Collections** are broad domains (e.g. `biology`, `chemistry`), each backed by\nits own Qdrant collection and HNSW index. **Topics** are optional sub-categories\nwithin a collection (e.g. `human`, `plant`).\n\n**User isolation.** Every request is authenticated with a Tapis access token via\nthe `X-Tapis-Token` header, and `user_id` is taken from the token's\n`tapis/username` claim — never from the request body. Each user's collections are\nseparate Qdrant collections, so users cannot see or affect each other's data, and\neach user chooses their own embedding model and vector dimension per collection.\n",
     "version": "1.0.0"
   },
   "paths": {

@@ -36,9 +36,9 @@ within a collection (e.g. `human`, `plant`).
 
 **User isolation.** Every request is authenticated with a Tapis access token via
 the `X-Tapis-Token` header, and `user_id` is taken from the token's
-`tapis/username` claim — never from the request body. Collections are physically
-shared, but every read, write, search and delete is filtered by `user_id`, so
-users never see or affect each other's data.
+`tapis/username` claim — never from the request body. Each user's collections are
+separate Qdrant collections, so users cannot see or affect each other's data, and
+each user chooses their own embedding model and vector dimension per collection.
 """
 
 
