@@ -58,8 +58,8 @@ def resolve_model(requested: str | None) -> str:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Reranker model '{requested}' is not allowed. "
-                f"Configured models: {', '.join(settings.rerank_allowed_models)}."
+                f"Reranker model '{requested}' is not allowed. Permitted models: "
+                f"{', '.join(settings.rerank_allowed_models)}."
             ),
         )
     return requested
@@ -82,10 +82,9 @@ def _load(model_name: str) -> Any:
             from sentence_transformers import CrossEncoder
         except ImportError as exc:
             raise CrossEncoderUnavailable(
-                "Cross-encoder reranking is not available in this deployment: "
-                "the optional 'sentence-transformers' dependency is not installed. "
-                "Install the service with the [rerank] extra, or use "
-                "method='mmr' / 'cosine_rescore' instead."
+                "Cross-encoder reranking is not available: this deployment was "
+                "built without the optional 'rerank' dependencies. Use rerank "
+                "method 'mmr' or 'cosine_rescore' instead."
             ) from exc
 
         if settings.rerank_threads > 0:

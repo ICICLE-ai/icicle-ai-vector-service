@@ -74,8 +74,11 @@ async def purge_all(
     if not confirm:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This deletes every embedding you own across all collections. "
-            "Re-send with ?confirm=true if that is what you intend.",
+            detail=(
+                "This operation deletes every embedding in every collection you "
+                "own and cannot be undone. Set the 'confirm' query parameter to "
+                "true to proceed."
+            ),
         )
 
     logger.warning("PURGE: deleting all data for user '%s'", current_user.username)
@@ -107,7 +110,7 @@ async def read_collection(
     if info is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Collection '{collection}' not found, or you have no embeddings in it.",
+            detail=f"Collection '{collection}' not found.",
         )
     return CollectionInfo(**info)
 

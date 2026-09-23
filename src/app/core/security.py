@@ -51,41 +51,48 @@ def _decode_token(token: str) -> dict[str, Any]:
             options={"verify_aud": False},
         )
     except jwt.ExpiredSignatureError as exc:
-        logger.warning("Rejected expired token")
+        logger.warning("Rejected token: expired")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired. Please obtain a fresh access token.",
+            detail="The access token has expired.",
         ) from exc
     except jwt.InvalidIssuerError as exc:
-        logger.warning("Rejected token with wrong issuer")
+        logger.warning("Rejected token: invalid issuer")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token issuer. Expected issuer: {settings.tapis_issuer}",
+            detail=f"Invalid token issuer. Expected: {settings.tapis_issuer}",
         ) from exc
     except jwt.PyJWTError as exc:
-        logger.warning("Rejected invalid token: %s", exc)
+        logger.warning("Rejected token: validation failed (%s)", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token validation failed. Ensure you are sending a valid Tapis access token.",
+            detail="The access token could not be validated.",
         ) from exc
 
     if claims.get("tapis/token_type") != "access":
-        logger.warning("Rejected non-access token type: %s", claims.get("tapis/token_type"))
+        logger.warning("Rejected token: type is %s, expected access", claims.get("tapis/token_type"))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Only Tapis access tokens are accepted. Received token type: "
-            f"'{claims.get('tapis/token_type')}'.",
+            detail=(
+                "Only Tapis access tokens are accepted. Received token type: "
+                f"'{claims.get('tapis/token_type')}'."
+            ),
         )
 
     tenant_id = claims.get("tapis/tenant_id")
     if tenant_id != settings.tapis_tenant_id:
         logger.warning(
-            "Rejected token from tenant '%s' (allowed: '%s')", tenant_id, settings.tapis_tenant_id
+            "Rejected token: tenant '%s', expected '%s'",
+            tenant_id,
+            settings.tapis_tenant_id,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied. This service only accepts tokens from the "
-            f"'{settings.tapis_tenant_id}' tenant. Your token belongs to '{tenant_id}'.",
+            detail=(
+                f"Access denied. This service accepts tokens from the "
+                f"'{settings.tapis_tenant_id}' tenant only; the supplied token "
+                f"belongs to '{tenant_id}'."
+            ),
         )
 
     return claims
@@ -97,10 +104,10 @@ async def get_current_user(
     claims = _decode_token(x_tapis_token)
     username = claims.get("tapis/username") or claims.get("sub")
     if not username:
-        logger.warning("Token accepted but has no username claim")
+        logger.warning("Rejected token: no username claim")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is valid but does not contain a username. Contact your Tapis administrator.",
+            detail="The access token does not contain a username claim.",
         )
     tenant_id = claims["tapis/tenant_id"]
     logger.info("Authenticated user '%s' (tenant: %s)", username, tenant_id)

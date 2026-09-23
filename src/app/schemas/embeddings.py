@@ -10,7 +10,7 @@ from .common import MetadataFilter
 def _require_text(value: str, field: str) -> str:
     value = value.strip()
     if not value:
-        raise ValueError(f"{field} must be a non-empty string")
+        raise ValueError(f"{field} must be a non-empty string.")
     return value
 
 
@@ -40,7 +40,7 @@ class EmbeddingCreate(BaseModel):
     @classmethod
     def validate_embedding(cls, value: list[float]) -> list[float]:
         if not value:
-            raise ValueError("embedding must be a non-empty list of floats")
+            raise ValueError("embedding must be a non-empty list of floats.")
         return value
 
     @field_validator("embedding_model")
@@ -49,14 +49,15 @@ class EmbeddingCreate(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError(
-                "embedding_model is required (e.g. 'nvidia/nvclip', 'gemini-embedding-001')"
+                "embedding_model must be a non-empty string identifying the model "
+                "that produced the embedding."
             )
         return value
 
     @model_validator(mode="after")
     def check_chunks(self) -> "EmbeddingCreate":
         if not self.chunks or any(not chunk.strip() for chunk in self.chunks):
-            raise ValueError("chunks must contain at least one non-empty string")
+            raise ValueError("chunks must contain at least one non-empty string.")
         return self
 
 
@@ -86,11 +87,11 @@ class EmbeddingUpdate(BaseModel):
                 "embedding_model",
             )
         ):
-            raise ValueError("At least one field must be provided to update")
+            raise ValueError("At least one field must be provided to update.")
         if self.chunks is not None and (
             not self.chunks or any(not chunk.strip() for chunk in self.chunks)
         ):
-            raise ValueError("chunks must contain at least one non-empty string")
+            raise ValueError("chunks must contain at least one non-empty string.")
         return self
 
 
@@ -149,17 +150,18 @@ class BulkDeleteRequest(BaseModel):
         if self.all:
             if self.ids or has_predicate:
                 raise ValueError(
-                    "all=true deletes everything you own in the collection; "
-                    "do not combine it with ids, topic or filter"
+                    "all=true selects every embedding in the collection and "
+                    "cannot be combined with ids, topic or filter."
                 )
             return self
         if self.ids and has_predicate:
-            raise ValueError("Provide either ids or a topic/filter predicate, not both")
+            raise ValueError("Provide either ids or a topic/filter predicate, not both.")
         # An empty ids list is falsy, so it lands here rather than needing a
         # check of its own.
         if not self.ids and not has_predicate:
             raise ValueError(
-                "Nothing selected. Provide ids, a topic/filter predicate, or all=true."
+                "No embeddings selected. Provide ids, a topic/filter predicate, "
+                "or all=true."
             )
         return self
 

@@ -58,7 +58,10 @@ def collection_name(owner: Owner, collection: str) -> str:
     if name is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Collection name '{collection}' contains no usable characters.",
+            detail=(
+                f"Collection name '{collection}' is not valid: it must contain "
+                "at least one letter or digit."
+            ),
         )
     return name
 
@@ -122,8 +125,7 @@ async def ensure_collection(
         if vector_dim is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Collection '{collection}' does not exist yet. "
-                "Store an embedding first to create it.",
+                detail=f"Collection '{collection}' not found.",
             )
         await client.create_collection(
             collection_name=name,
@@ -148,11 +150,10 @@ async def _assert_dimension_matches(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                f"Your collection '{collection}' stores {existing}-dimensional "
-                f"vectors, but this embedding has {vector_dim}. A collection's "
-                "dimension is fixed when its first embedding is stored. Use a "
-                f"different collection name for a {vector_dim}-dimensional model, "
-                "or delete this collection first."
+                f"Vector dimension mismatch: collection '{collection}' stores "
+                f"{existing}-dimensional vectors, but the supplied embedding has "
+                f"{vector_dim}. A collection's dimension is fixed by its first "
+                "embedding and cannot be changed."
             ),
         )
 

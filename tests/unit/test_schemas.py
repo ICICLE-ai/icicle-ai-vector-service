@@ -153,7 +153,7 @@ class TestBulkDeleteRequest:
         assert BulkDeleteRequest(collection="c", all=True).all is True
 
     def test_no_selector_rejected(self):
-        with pytest.raises(ValidationError, match="Nothing selected"):
+        with pytest.raises(ValidationError, match="No embeddings selected"):
             BulkDeleteRequest(collection="c")
 
     def test_ids_plus_predicate_rejected(self):
@@ -162,15 +162,15 @@ class TestBulkDeleteRequest:
 
     @pytest.mark.parametrize("extra", [{"ids": ["a"]}, {"topic": "t"}])
     def test_all_combined_with_anything_rejected(self, extra):
-        with pytest.raises(ValidationError, match="do not combine"):
+        with pytest.raises(ValidationError, match="cannot be combined"):
             BulkDeleteRequest(collection="c", all=True, **extra)
 
     def test_empty_ids_list_rejected(self):
-        """Caught by the "nothing selected" branch, since [] is falsy."""
-        with pytest.raises(ValidationError, match="Nothing selected"):
+        """Caught by the "no embeddings selected" branch, since [] is falsy."""
+        with pytest.raises(ValidationError, match="No embeddings selected"):
             BulkDeleteRequest(collection="c", ids=[])
 
     def test_empty_metadata_filter_is_not_a_selector(self):
         """`filter: {conditions: {}}` selects everything — must not be allowed."""
-        with pytest.raises(ValidationError, match="Nothing selected"):
+        with pytest.raises(ValidationError, match="No embeddings selected"):
             BulkDeleteRequest(collection="c", filter={"conditions": {}})

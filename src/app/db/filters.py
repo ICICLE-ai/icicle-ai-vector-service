@@ -41,7 +41,7 @@ def owner_condition(user_id: str) -> FieldCondition:
     if not user_id:
         # Defensive: an empty user_id would match points whose user_id is "",
         # so refuse rather than build a filter that could over-match.
-        raise ValueError("user_id must not be empty when building a Qdrant filter")
+        raise ValueError("user_id must not be empty.")
     return FieldCondition(key=USER_ID_FIELD, match=MatchValue(value=user_id))
 
 
@@ -96,5 +96,5 @@ def scoped_ids(user_id: str, ids: list[str]) -> Filter:
     belonging to someone else simply matches nothing.
     """
     if not ids:
-        raise ValueError("ids must not be empty when building an id filter")
+        raise ValueError("ids must not be empty.")
     return Filter(must=[owner_condition(user_id), HasIdCondition(has_id=list(ids))])

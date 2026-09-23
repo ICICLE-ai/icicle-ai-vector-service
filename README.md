@@ -71,7 +71,7 @@ cp .env.example .env
 | `RERANK_MODEL`           | `BAAI/bge-reranker-base`                                         | Model used when a request does not name one                            |
 | `RERANK_ALLOWED_MODELS`  | `["BAAI/bge-reranker-base","cross-encoder/ms-marco-MiniLM-L-6-v2"]` | JSON array. A request may only select a model from this list           |
 | `RERANK_PRELOAD`         | `false`                                                          | Load the default model at startup instead of on first use              |
-| `RERANK_THREADS`         | `0`                                                              | Torch intra-op threads. `0` = let torch decide from the cgroup         |
+| `RERANK_THREADS`         | `0`                                                              | Torch intra-op threads. **Set this explicitly.** `0` lets torch read `nproc`, which in a container reports the *host's* CPU count, not the cgroup quota — oversubscribing threads and causing heavy throttling. Match it to the pod's actual CPU limit. |
 | `RERANK_MAX_CANDIDATES`  | `128`                                                            | Hard cap on candidates scored per request                              |
 | `RERANK_MAX_LENGTH`      | `512`                                                            | Token truncation length for each (query, passage) pair                 |
 
@@ -132,10 +132,10 @@ Log in to the [ICICLEaaS Portal](https://icicleai.tapis.io), click your username
 | Scenario                   | Status | Response                                                                        |
 | -------------------------- | ------ | ------------------------------------------------------------------------------- |
 | No `X-Tapis-Token` header  | `422`  | `"field required"`                                                              |
-| Expired token              | `401`  | `"Token has expired. Please obtain a fresh access token."`                      |
-| Wrong issuer               | `401`  | `"Invalid token issuer. Expected issuer: ..."`                                  |
-| Wrong tenant (e.g. `tacc`) | `403`  | `"Access denied. This service only accepts tokens from the 'icicleai' tenant."` |
-| Invalid/malformed token    | `401`  | `"Token validation failed. Ensure you are sending a valid Tapis access token."` |
+| Expired token              | `401`  | `"The access token has expired."`                                               |
+| Wrong issuer               | `401`  | `"Invalid token issuer. Expected: ..."`                                         |
+| Wrong tenant (e.g. `tacc`) | `403`  | `"Access denied. This service accepts tokens from the 'icicleai' tenant only."` |
+| Invalid/malformed token    | `401`  | `"The access token could not be validated."`                                    |
 
 
 ## How to Store an Embedding
@@ -653,7 +653,8 @@ the app.
 - **"Qdrant is not reachable"**: If Qdrant is behind an HTTPS reverse proxy (port 443), append `:443` to `QDRANT_URL` (e.g. `https://host.example.com:443`). The qdrant-client library defaults to port 6333 if no port is specified.
 - **401/403 errors**: Ensure your Tapis token is fresh, from the `icicleai` tenant, and passed via the `X-Tapis-Token` header.
 - **Dimension mismatch**: The `embedding` array length must match the collection's dimension (set by the first embedding stored in that collection).
-- **"collection is required"**: All retrieve/rerank requests must specify which collection to query.
+- **`422` "collection must be a non-empty string"**: every retrieve and rerank request must name the collection to query.
+- **Cross-encoder is far slower than expected**: the container is probably CPU-throttled. In a container `nproc` reports the *host's* CPU count, not the cgroup quota, so torch, OpenBLAS and tokenizers each size their thread pools far too high and spend most of each scheduling period stalled. Check with `cat /sys/fs/cgroup/cpu.max` (gives `QUOTA PERIOD`, so `1001000 100000` = 10 CPUs) and `cat /sys/fs/cgroup/cpu.stat` (compare `nr_throttled` to `nr_periods`). Then pin `RERANK_THREADS`, `OMP_NUM_THREADS` and `OPENBLAS_NUM_THREADS` to the quota. On the ICICLE TACC deployment, 32 visible CPUs against a 10-CPU quota throttled 30% of periods and cost roughly 25x.
 - **`503` on `method="cross_encoder"`**: the optional `[rerank]` extra is not installed in this deployment. Install it (see Quickstart Step 5) or use `mmr` / `cosine_rescore`. `GET /healthz` reports `cross_encoder: false` in this case.
 - **First cross-encoder request is slow (10–20s)**: the model weights are being downloaded and loaded. Subsequent requests are fast. Set `RERANK_PRELOAD=true` to pay this during startup, or mount a volume at `$HF_HOME` so the download survives pod restarts.
 - **`400` "Reranker model is not allowed"**: `rerank_model` must be one of `RERANK_ALLOWED_MODELS`. Check `GET /v1/rerank/methods` for the current list.
@@ -968,6 +969,24 @@ All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 Interactive docs are served at `/docs`; the committed [`openapi.json`](openapi.json)
 is the same spec, for client generation.
 
+
+## Status Codes
+
+| Code | Meaning | When |
+| ---- | ------- | ---- |
+| `200` | OK | Successful read, update, delete or search |
+| `201` | Created | Embedding stored |
+| `400` | Bad Request | Disallowed reranker model; purge without `confirm=true` |
+| `401` | Unauthorized | Token missing a username, expired, malformed, or not an access token |
+| `403` | Forbidden | Token is valid but belongs to another Tapis tenant |
+| `404` | Not Found | Collection or embedding does not exist, or is not yours |
+| `409` | Conflict | Embedding dimension does not match the collection's |
+| `422` | Unprocessable Entity | Request body or query parameters failed validation |
+| `503` | Service Unavailable | Cross-encoder requested but not installed in this deployment |
+
+`404` is deliberately returned both for a resource that does not exist and for one
+belonging to another user, with identical wording — distinguishing them would let
+a caller discover other users' collection and embedding IDs.
 
 ## Request Fields
 

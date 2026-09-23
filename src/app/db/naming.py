@@ -71,9 +71,9 @@ class Owner:
 
     def __post_init__(self) -> None:
         if not self.username:
-            raise ValueError("username must not be empty")
+            raise ValueError("username must not be empty.")
         if not self.tenant_id:
-            raise ValueError("tenant_id must not be empty")
+            raise ValueError("tenant_id must not be empty.")
 
     @classmethod
     def from_context(cls, context) -> "Owner":

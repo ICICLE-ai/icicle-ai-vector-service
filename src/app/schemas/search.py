@@ -22,14 +22,14 @@ class _QueryBase(BaseModel):
     def validate_collection(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("collection is required — specify which collection to query")
+            raise ValueError("collection must be a non-empty string.")
         return value
 
     @field_validator("query_embedding")
     @classmethod
     def validate_embedding(cls, value: list[float]) -> list[float]:
         if not value:
-            raise ValueError("query_embedding must be a non-empty list of floats")
+            raise ValueError("query_embedding must be a non-empty list of floats.")
         return value
 
 
@@ -67,8 +67,8 @@ class RerankRequest(_QueryBase):
             self.query_text and self.query_text.strip()
         ):
             raise ValueError(
-                "query_text is required when method='cross_encoder' — the "
-                "cross-encoder scores the raw query against each candidate's text."
+                "query_text is required when method is 'cross_encoder', which "
+                "scores the query text against each candidate's text."
             )
         return self
 
