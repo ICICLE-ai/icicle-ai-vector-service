@@ -89,9 +89,12 @@ class TestDistinctValuesFallback:
                 wait=True,
             )
 
-            topics = await _distinct_values(memory, "c", "topic", filters.owned_by("alice"))
+            topics, truncated = await _distinct_values(
+                memory, "c", "topic", filters.owned_by("alice")
+            )
             assert topics == ["a", "b"]
             assert "secret" not in topics
+            assert truncated is False
         finally:
             await memory.close()
 
@@ -138,11 +141,12 @@ class TestFacetFallback:
 
             monkeypatch.setattr(memory, "facet", _no_facet)
 
-            topics = await repository._distinct_values(
+            topics, truncated = await repository._distinct_values(
                 memory, "c", "topic", filters.owned_by("alice")
             )
             assert topics == ["t0", "t1", "t2"]
             assert "bob-secret" not in topics
+            assert truncated is False
         finally:
             await memory.close()
 
@@ -176,9 +180,10 @@ class TestFacetFallback:
             monkeypatch.setattr(repository, "_SCROLL_PAGE", 2)
             monkeypatch.setattr(repository, "_FACET_SCROLL_CAP", 4)
 
-            topics = await repository._distinct_values(
+            topics, truncated = await repository._distinct_values(
                 memory, "c", "topic", filters.owned_by("alice")
             )
             assert len(topics) == 4  # stopped at the cap rather than reading all 10
+            assert truncated is True  # and says so, rather than silently under-reporting
         finally:
             await memory.close()

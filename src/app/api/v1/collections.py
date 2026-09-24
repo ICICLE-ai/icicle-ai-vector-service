@@ -48,19 +48,32 @@ async def list_collections(
         "also derives topics and embedding models, at two extra Qdrant calls per "
         "collection.",
     ),
+    limit: int = Query(25, ge=1, le=100, description="Page size"),
+    offset: int = Query(0, ge=0, description="Collections to skip"),
     client: AsyncQdrantClient = Depends(get_qdrant_client),
     current_user: UserContext = Depends(get_current_user),
 ) -> CollectionList:
     logger.info(
-        "Listing collections for user '%s' (detail: %s)", current_user.username, detail
+        "Listing collections for user '%s' (detail: %s, limit: %d, offset: %d)",
+        current_user.username,
+        detail,
+        limit,
+        offset,
     )
-    collections = await list_user_collections(
-        client, Owner.from_context(current_user), detail=detail
+    collections, total = await list_user_collections(
+        client,
+        Owner.from_context(current_user),
+        detail=detail,
+        limit=limit,
+        offset=offset,
     )
+    next_offset = offset + limit if offset + limit < total else None
     return CollectionList(
         user_id=current_user.username,
         count=len(collections),
+        total=total,
         detail=detail,
+        next_offset=next_offset,
         collections=[CollectionInfo(**item) for item in collections],
     )
 

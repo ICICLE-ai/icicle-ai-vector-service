@@ -42,6 +42,9 @@ Payload = dict[str, Any]
 # Cap on simultaneous per-collection lookups when listing.
 _LIST_CONCURRENCY = 16
 
+# Distinct values returned per field; beyond this the list is reported truncated.
+_FACET_LIMIT = 100
+
 _FACET_SCROLL_CAP = 10_000
 _SCROLL_PAGE = 512
 
@@ -417,7 +420,7 @@ async def fetch_candidates(
 
 async def _distinct_values(
     client: AsyncQdrantClient, name: str, key: str, scope: Any
-) -> list[str]:
+) -> tuple[list[str], bool]:
     """Distinct values of a payload key within the caller's scope.
 
     Prefers the server-side facet API; falls back to a bounded payload scroll
@@ -425,9 +428,10 @@ async def _distinct_values(
     """
     try:
         response = await client.facet(
-            collection_name=name, key=key, facet_filter=scope, limit=100
+            collection_name=name, key=key, facet_filter=scope, limit=_FACET_LIMIT
         )
-        return sorted(str(hit.value) for hit in response.hits if hit.value is not None)
+        values = sorted(str(h.value) for h in response.hits if h.value is not None)
+        return values, len(values) >= _FACET_LIMIT
     except Exception:
         logger.debug("facet unavailable for '%s', falling back to scroll", name)
 
@@ -452,7 +456,7 @@ async def _distinct_values(
                 values.add(str(value))
         if offset is None:
             break
-    return sorted(values)
+    return sorted(values), seen >= _FACET_SCROLL_CAP
 
 
 async def _count(client: AsyncQdrantClient, name: str, scope: Any | None = None) -> int:
@@ -479,20 +483,24 @@ async def _collection_stats(
         "topics": None,
         "embedding_models": None,
     }
+    stats["truncated"] = False
     if detail == "full":
         scope = filters.owned_by(owner.username)
-        stats["topics"] = await _distinct_values(
-            client, physical, filters.TOPIC_FIELD, scope
-        )
-        stats["embedding_models"] = await _distinct_values(
-            client, physical, "embedding_model", scope
-        )
+        topics, t1 = await _distinct_values(client, physical, filters.TOPIC_FIELD, scope)
+        models, t2 = await _distinct_values(client, physical, "embedding_model", scope)
+        stats["topics"] = topics
+        stats["embedding_models"] = models
+        stats["truncated"] = t1 or t2
     return stats
 
 
 async def list_user_collections(
-    client: AsyncQdrantClient, owner: Owner, detail: str = "full"
-) -> list[dict[str, Any]]:
+    client: AsyncQdrantClient,
+    owner: Owner,
+    detail: str = "full",
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
     """List the caller's collections.
 
     A prefix scan, so collections belonging to other users are never inspected.
@@ -501,8 +509,11 @@ async def list_user_collections(
     concurrently rather than serially, bounded by a semaphore.
     """
     physicals = await owned_collections(client, owner)
-    if not physicals:
-        return []
+    total = len(physicals)
+    # Slice before the per-collection lookups, so cost tracks the page not the total.
+    page = physicals[offset : offset + limit] if limit is not None else physicals[offset:]
+    if not page:
+        return [], total
 
     limiter = asyncio.Semaphore(_LIST_CONCURRENCY)
 
@@ -511,8 +522,8 @@ async def list_user_collections(
             points = await _count(client, physical, filters.owned_by(owner.username))
             return await _collection_stats(client, owner, physical, points, detail)
 
-    result = await asyncio.gather(*(stats_for(name) for name in physicals))
-    return sorted(result, key=lambda item: item["collection"] or "")
+    result = await asyncio.gather(*(stats_for(name) for name in page))
+    return sorted(result, key=lambda item: item["collection"] or ""), total
 
 
 async def get_user_collection(
@@ -664,29 +675,32 @@ async def purge_user_data(
 
     Returns ``(total_deleted, collections_affected, collections_dropped)``.
     """
-    total = 0
-    affected: list[str] = []
-    dropped: list[str] = []
+    physicals = await owned_collections(client, owner)
+    if not physicals:
+        return 0, [], []
 
-    for physical in await owned_collections(client, owner):
-        matched = await _count(client, physical, filters.owned_by(owner.username))
-        name = display_name(owner, physical) or physical
-        affected.append(name)
-        total += matched
+    scope = filters.owned_by(owner.username)
+    limiter = asyncio.Semaphore(_LIST_CONCURRENCY)
 
-        if settings.drop_empty_collections:
-            await client.delete_collection(collection_name=physical)
-            dropped.append(name)
-        else:
+    async def purge_one(physical: str) -> tuple[str, int, bool]:
+        async with limiter:
+            matched = await _count(client, physical, scope)
+            name = display_name(owner, physical) or physical
+            if settings.drop_empty_collections:
+                await client.delete_collection(collection_name=physical)
+                return name, matched, True
             await client.delete(
                 collection_name=physical,
-                points_selector=FilterSelector(
-                    filter=filters.owned_by(owner.username)
-                ),
+                points_selector=FilterSelector(filter=scope),
                 wait=True,
             )
+            return name, matched, False
 
-    return total, sorted(affected), sorted(dropped)
+    outcomes = await asyncio.gather(*(purge_one(p) for p in physicals))
+    total = sum(m for _, m, _ in outcomes)
+    affected = sorted(n for n, _, _ in outcomes)
+    dropped = sorted(n for n, _, d in outcomes if d)
+    return total, affected, dropped
 
 
 async def backfill_payload_indexes(client: AsyncQdrantClient) -> int:

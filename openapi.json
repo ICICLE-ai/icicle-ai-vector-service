@@ -375,6 +375,33 @@
             "description": "'basic' returns names, point counts and dimensions. 'full' also derives topics and embedding models, at two extra Qdrant calls per collection."
           },
           {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Page size",
+              "default": 25,
+              "title": "Limit"
+            },
+            "description": "Page size"
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Collections to skip",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Collections to skip"
+          },
+          {
             "name": "X-Tapis-Token",
             "in": "header",
             "required": true,
@@ -845,13 +872,15 @@
                 "items": {
                   "type": "string"
                 },
-                "type": "array"
+                "type": "array",
+                "maxItems": 1000
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Ids"
+            "title": "Ids",
+            "description": "Explicit embedding ids, at most 1000."
           },
           "topic": {
             "anyOf": [
@@ -950,7 +979,7 @@
               }
             ],
             "title": "Topics",
-            "description": "Null unless detail=full was requested."
+            "description": "Null unless detail=full. Capped at 100 distinct values."
           },
           "embedding_models": {
             "anyOf": [
@@ -965,7 +994,13 @@
               }
             ],
             "title": "Embedding Models",
-            "description": "Null unless detail=full was requested."
+            "description": "Null unless detail=full. Capped at 100 distinct values."
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "description": "True when topics or embedding_models hit the 100-value cap and the list is incomplete.",
+            "default": false
           }
         },
         "type": "object",
@@ -986,6 +1021,11 @@
             "type": "integer",
             "title": "Count"
           },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Collections you own, ignoring pagination."
+          },
           "detail": {
             "type": "string",
             "enum": [
@@ -993,6 +1033,18 @@
               "full"
             ],
             "title": "Detail"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset",
+            "description": "Pass as ?offset= for the next page. Null on the last page."
           },
           "collections": {
             "items": {
@@ -1006,6 +1058,7 @@
         "required": [
           "user_id",
           "count",
+          "total",
           "detail",
           "collections"
         ],

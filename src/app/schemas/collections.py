@@ -20,17 +20,26 @@ class CollectionInfo(BaseModel):
     points: int
     vector_dim: int | None = None
     topics: list[str] | None = Field(
-        None, description="Null unless detail=full was requested."
+        None, description="Null unless detail=full. Capped at 100 distinct values."
     )
     embedding_models: list[str] | None = Field(
-        None, description="Null unless detail=full was requested."
+        None, description="Null unless detail=full. Capped at 100 distinct values."
+    )
+    truncated: bool = Field(
+        False,
+        description="True when topics or embedding_models hit the 100-value cap "
+        "and the list is incomplete.",
     )
 
 
 class CollectionList(BaseModel):
     user_id: str
     count: int
+    total: int = Field(description="Collections you own, ignoring pagination.")
     detail: CollectionDetail
+    next_offset: int | None = Field(
+        None, description="Pass as ?offset= for the next page. Null on the last page."
+    )
     collections: list[CollectionInfo]
 
 

@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .common import MetadataFilter
 
+# Bounds the id list sent to Qdrant as a single filter condition.
+MAX_BULK_DELETE_IDS = 1000
+
 
 def _require_text(value: str, field: str) -> str:
     value = value.strip()
@@ -134,7 +137,11 @@ class BulkDeleteRequest(BaseModel):
     """
 
     collection: str
-    ids: list[str] | None = None
+    ids: list[str] | None = Field(
+        None,
+        max_length=MAX_BULK_DELETE_IDS,
+        description=f"Explicit embedding ids, at most {MAX_BULK_DELETE_IDS}.",
+    )
     topic: str | None = None
     filter: MetadataFilter | None = None
     all: bool = False

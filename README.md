@@ -478,21 +478,14 @@ Response (`200`):
 {
   "user_id": "thevyasamit",
   "count": 2,
+  "total": 2,
+  "detail": "basic",
+  "next_offset": null,
   "collections": [
-    {
-      "collection": "biology",
-      "points": 42,
-      "topics": ["human", "plant"],
-      "vector_dim": 768,
-      "embedding_models": ["gemini-embedding-001"]
-    },
-    {
-      "collection": "chemistry",
-      "points": 17,
-      "topics": ["organic"],
-      "vector_dim": 768,
-      "embedding_models": ["gemini-embedding-001"]
-    }
+    { "collection": "biology", "points": 42, "vector_dim": 768,
+      "topics": null, "embedding_models": null, "truncated": false },
+    { "collection": "chemistry", "points": 17, "vector_dim": 768,
+      "topics": null, "embedding_models": null, "truncated": false }
   ]
 }
 ```
@@ -1055,7 +1048,7 @@ All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 | `PUT`    | `/v1/embeddings/{id}?collection=`            | Partial update of an embedding                          |
 | `DELETE` | `/v1/embeddings/{id}?collection=`            | Delete one embedding                                    |
 | `POST`   | `/v1/embeddings/bulk-delete`                 | Delete many by ids, topic/metadata predicate, or all    |
-| `GET`    | `/v1/collections?detail=`                    | List your collections (`basic` by default, `full` adds topics/models) |
+| `GET`    | `/v1/collections`                            | List your collections, paginated (25/page)              |
 | `DELETE` | `/v1/collections?confirm=true`               | Delete **all** your embeddings across every collection  |
 | `GET`    | `/v1/collections/{collection}`               | Stats for one collection                                |
 | `GET`    | `/v1/collections/{collection}/embeddings`    | Paginated listing of your embeddings in a collection    |
@@ -1161,7 +1154,7 @@ Exactly one selector: `ids`, or a `topic`/`filter` predicate, or `all`.
 | Field        | Required | Description                                                            |
 | ------------ | -------- | ----------------------------------------------------------------------- |
 | `collection` | yes      | Which collection to delete from                                        |
-| `ids`        | one of   | Explicit embedding ids. Ids you don't own are skipped                  |
+| `ids`        | one of   | Explicit embedding ids, at most 1000. Ids you don't own are skipped    |
 | `topic`      | one of   | Delete everything you own with this topic                              |
 | `filter`     | one of   | Metadata predicate, combinable with `topic`                            |
 | `all`        | one of   | `true` deletes everything you own in the collection. Cannot be combined |
@@ -1185,11 +1178,20 @@ combinations return `422`.
 
 | Query param | Required | Description                                                   |
 | ----------- | -------- | ------------------------------------------------------------- |
+| `limit`     | no       | Page size, 1–100 (default 25)                                 |
+| `offset`    | no       | Collections to skip (default 0)                               |
 | `detail`    | no       | `basic` (default) returns names, point counts and dimensions. `full` also derives topics and embedding models, at two extra Qdrant calls per collection. |
 
-`basic` exists because the listing's cost is proportional to how many collections
-you own; omitting the facets halves the work. `GET /v1/collections/{collection}`
-always returns full detail, since it describes a single collection.
+Returns `total` (all collections you own) and `next_offset` (null on the last page).
+Paginated because the endpoint's cost is proportional to the number of collections
+returned; `basic` halves that cost again.
+
+`topics` and `embedding_models` are capped at 100 distinct values. When the cap is
+hit, `truncated` is `true` on that collection rather than the list silently being
+short.
+
+`GET /v1/collections/{collection}` always returns full detail, since it describes a
+single collection.
 
 
 ### Purge (`DELETE /v1/collections`)

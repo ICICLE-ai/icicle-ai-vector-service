@@ -11,7 +11,8 @@ class TestListing:
     async def test_empty_when_nothing_stored(self, client):
         body = (await client.get("/v1/collections")).json()
         assert body == {
-            "user_id": "alice", "count": 0, "detail": "basic", "collections": []
+            "user_id": "alice", "count": 0, "total": 0, "detail": "basic",
+            "next_offset": None, "collections": [],
         }
 
     async def test_basic_is_the_default_and_omits_facets(self, client):
@@ -297,3 +298,86 @@ class TestListingScales:
         assert by_name["one"]["topics"] == ["alpha"]
         assert by_name["two"]["points"] == 3
         assert by_name["two"]["topics"] == ["beta"]
+
+
+class TestListingPagination:
+    """The listing is paginated so its cost tracks the page, not the total."""
+
+    async def test_defaults_to_25_per_page(self, client):
+        for i in range(30):
+            await store(client, collection=f"c{i:02d}")
+        body = (await client.get("/v1/collections")).json()
+        assert body["count"] == 25
+        assert body["total"] == 30
+        assert body["next_offset"] == 25
+
+    async def test_last_page_has_no_next_offset(self, client):
+        for i in range(30):
+            await store(client, collection=f"c{i:02d}")
+        body = (await client.get("/v1/collections?offset=25")).json()
+        assert body["count"] == 5
+        assert body["total"] == 30
+        assert body["next_offset"] is None
+
+    async def test_pages_do_not_overlap_and_cover_everything(self, client):
+        for i in range(30):
+            await store(client, collection=f"c{i:02d}")
+        seen, offset = [], 0
+        while offset is not None:
+            body = (await client.get(f"/v1/collections?limit=10&offset={offset}")).json()
+            seen += [c["collection"] for c in body["collections"]]
+            offset = body["next_offset"]
+        assert len(seen) == 30
+        assert len(set(seen)) == 30
+        assert seen == sorted(seen)
+
+    async def test_smaller_page_is_honoured(self, client):
+        for i in range(10):
+            await store(client, collection=f"c{i:02d}")
+        body = (await client.get("/v1/collections?limit=3")).json()
+        assert body["count"] == 3
+        assert body["total"] == 10
+
+    @pytest.mark.parametrize("query", ["limit=0", "limit=101", "offset=-1"])
+    async def test_invalid_paging_rejected(self, client, query):
+        await store(client)
+        assert (await client.get(f"/v1/collections?{query}")).status_code == 422
+
+    async def test_offset_past_the_end_is_empty_not_an_error(self, client):
+        await store(client)
+        body = (await client.get("/v1/collections?offset=500")).json()
+        assert body["count"] == 0
+        assert body["total"] == 1
+        assert body["next_offset"] is None
+
+
+class TestBulkDeleteIdCap:
+    async def test_ids_over_the_cap_are_rejected(self, client):
+        await store(client)
+        response = await client.post("/v1/embeddings/bulk-delete", json={
+            "collection": "biology", "ids": [f"id-{i}" for i in range(1001)]})
+        assert response.status_code == 422
+
+    async def test_ids_at_the_cap_are_accepted(self, client):
+        await store(client)
+        response = await client.post("/v1/embeddings/bulk-delete", json={
+            "collection": "biology", "ids": [f"id-{i}" for i in range(1000)]})
+        assert response.status_code == 200
+
+
+class TestTruncationIsReported:
+    async def test_not_truncated_for_a_small_collection(self, client):
+        await store(client, topic="plant")
+        body = (await client.get("/v1/collections?detail=full")).json()
+        assert body["collections"][0]["truncated"] is False
+
+    async def test_truncated_when_distinct_values_hit_the_cap(self, client, monkeypatch):
+        """Better an explicit flag than a silently short list."""
+        from src.app.db import repository
+        monkeypatch.setattr(repository, "_FACET_LIMIT", 3)
+        for i in range(5):
+            await store(client, topic=f"topic{i}", embedding=vector(float(i + 1)))
+        body = (await client.get("/v1/collections?detail=full")).json()
+        info = body["collections"][0]
+        assert len(info["topics"]) <= 3
+        assert info["truncated"] is True
