@@ -1055,7 +1055,7 @@ All endpoints (except `/healthz`) require the `X-Tapis-Token` header.
 | `PUT`    | `/v1/embeddings/{id}?collection=`            | Partial update of an embedding                          |
 | `DELETE` | `/v1/embeddings/{id}?collection=`            | Delete one embedding                                    |
 | `POST`   | `/v1/embeddings/bulk-delete`                 | Delete many by ids, topic/metadata predicate, or all    |
-| `GET`    | `/v1/collections`                            | List your collections with per-user counts and topics   |
+| `GET`    | `/v1/collections?detail=`                    | List your collections (`basic` by default, `full` adds topics/models) |
 | `DELETE` | `/v1/collections?confirm=true`               | Delete **all** your embeddings across every collection  |
 | `GET`    | `/v1/collections/{collection}`               | Stats for one collection                                |
 | `GET`    | `/v1/collections/{collection}/embeddings`    | Paginated listing of your embeddings in a collection    |
@@ -1178,6 +1178,18 @@ combinations return `422`.
 | `limit`     | no       | Page size, 1–500 (default 50)                                 |
 | `offset`    | no       | Cursor from the previous page's `next_offset`                 |
 | `topic`     | no       | Only embeddings with this topic                               |
+
+
+### List collections (`GET /v1/collections`)
+
+
+| Query param | Required | Description                                                   |
+| ----------- | -------- | ------------------------------------------------------------- |
+| `detail`    | no       | `basic` (default) returns names, point counts and dimensions. `full` also derives topics and embedding models, at two extra Qdrant calls per collection. |
+
+`basic` exists because the listing's cost is proportional to how many collections
+you own; omitting the facets halves the work. `GET /v1/collections/{collection}`
+always returns full detail, since it describes a single collection.
 
 
 ### Purge (`DELETE /v1/collections`)

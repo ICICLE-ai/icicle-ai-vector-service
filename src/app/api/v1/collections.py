@@ -28,6 +28,7 @@ from ...db.repository import (
 )
 from ...schemas import (
     BulkDeleteResponse,
+    CollectionDetail,
     CollectionInfo,
     CollectionList,
     EmbeddingListResponse,
@@ -41,14 +42,25 @@ router = APIRouter(prefix="/collections", tags=["collections"])
 
 @router.get("", response_model=CollectionList, summary="List your collections")
 async def list_collections(
+    detail: CollectionDetail = Query(
+        "basic",
+        description="'basic' returns names, point counts and dimensions. 'full' "
+        "also derives topics and embedding models, at two extra Qdrant calls per "
+        "collection.",
+    ),
     client: AsyncQdrantClient = Depends(get_qdrant_client),
     current_user: UserContext = Depends(get_current_user),
 ) -> CollectionList:
-    logger.info("Listing collections for user '%s'", current_user.username)
-    collections = await list_user_collections(client, Owner.from_context(current_user))
+    logger.info(
+        "Listing collections for user '%s' (detail: %s)", current_user.username, detail
+    )
+    collections = await list_user_collections(
+        client, Owner.from_context(current_user), detail=detail
+    )
     return CollectionList(
         user_id=current_user.username,
         count=len(collections),
+        detail=detail,
         collections=[CollectionInfo(**item) for item in collections],
     )
 

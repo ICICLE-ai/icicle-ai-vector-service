@@ -460,23 +460,38 @@ async def _count(client: AsyncQdrantClient, name: str, scope: Any | None = None)
 
 
 async def _collection_stats(
-    client: AsyncQdrantClient, owner: Owner, physical: str, points: int
+    client: AsyncQdrantClient,
+    owner: Owner,
+    physical: str,
+    points: int,
+    detail: str = "full",
 ) -> dict[str, Any]:
-    scope = filters.owned_by(owner.username)
+    """Stats for one collection.
+
+    ``detail="basic"`` omits topics and embedding models, each of which costs a
+    facet call, halving the Qdrant calls per collection.
+    """
     info = await client.get_collection(collection_name=physical)
-    return {
+    stats: dict[str, Any] = {
         "collection": display_name(owner, physical),
         "points": points,
-        "topics": await _distinct_values(client, physical, filters.TOPIC_FIELD, scope),
         "vector_dim": getattr(info.config.params.vectors, "size", None),
-        "embedding_models": await _distinct_values(
-            client, physical, "embedding_model", scope
-        ),
+        "topics": None,
+        "embedding_models": None,
     }
+    if detail == "full":
+        scope = filters.owned_by(owner.username)
+        stats["topics"] = await _distinct_values(
+            client, physical, filters.TOPIC_FIELD, scope
+        )
+        stats["embedding_models"] = await _distinct_values(
+            client, physical, "embedding_model", scope
+        )
+    return stats
 
 
 async def list_user_collections(
-    client: AsyncQdrantClient, owner: Owner
+    client: AsyncQdrantClient, owner: Owner, detail: str = "full"
 ) -> list[dict[str, Any]]:
     """List the caller's collections.
 
@@ -494,7 +509,7 @@ async def list_user_collections(
     async def stats_for(physical: str) -> dict[str, Any]:
         async with limiter:
             points = await _count(client, physical, filters.owned_by(owner.username))
-            return await _collection_stats(client, owner, physical, points)
+            return await _collection_stats(client, owner, physical, points, detail)
 
     result = await asyncio.gather(*(stats_for(name) for name in physicals))
     return sorted(result, key=lambda item: item["collection"] or "")
@@ -508,7 +523,7 @@ async def get_user_collection(
     if not await collection_exists(client, name):
         return None
     points = await _count(client, name, filters.owned_by(owner.username))
-    return await _collection_stats(client, owner, name, points)
+    return await _collection_stats(client, owner, name, points, detail="full")
 
 
 async def list_collection_embeddings(

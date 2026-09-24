@@ -359,6 +359,22 @@
         "operationId": "list_collections_v1_collections_get",
         "parameters": [
           {
+            "name": "detail",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "basic",
+                "full"
+              ],
+              "type": "string",
+              "description": "'basic' returns names, point counts and dimensions. 'full' also derives topics and embedding models, at two extra Qdrant calls per collection.",
+              "default": "basic",
+              "title": "Detail"
+            },
+            "description": "'basic' returns names, point counts and dimensions. 'full' also derives topics and embedding models, at two extra Qdrant calls per collection."
+          },
+          {
             "name": "X-Tapis-Token",
             "in": "header",
             "required": true,
@@ -910,13 +926,6 @@
             "type": "integer",
             "title": "Points"
           },
-          "topics": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Topics"
-          },
           "vector_dim": {
             "anyOf": [
               {
@@ -928,12 +937,35 @@
             ],
             "title": "Vector Dim"
           },
+          "topics": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topics",
+            "description": "Null unless detail=full was requested."
+          },
           "embedding_models": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Embedding Models"
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Embedding Models",
+            "description": "Null unless detail=full was requested."
           }
         },
         "type": "object",
@@ -954,6 +986,14 @@
             "type": "integer",
             "title": "Count"
           },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "basic",
+              "full"
+            ],
+            "title": "Detail"
+          },
           "collections": {
             "items": {
               "$ref": "#/components/schemas/CollectionInfo"
@@ -966,6 +1006,7 @@
         "required": [
           "user_id",
           "count",
+          "detail",
           "collections"
         ],
         "title": "CollectionList"

@@ -1,6 +1,12 @@
 """Collection listing and purge models."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+# "basic" returns names and point counts; "full" also derives topics and
+# embedding models, which costs two extra Qdrant calls per collection.
+CollectionDetail = Literal["basic", "full"]
 
 
 class CollectionInfo(BaseModel):
@@ -12,14 +18,19 @@ class CollectionInfo(BaseModel):
 
     collection: str
     points: int
-    topics: list[str] = Field(default_factory=list)
     vector_dim: int | None = None
-    embedding_models: list[str] = Field(default_factory=list)
+    topics: list[str] | None = Field(
+        None, description="Null unless detail=full was requested."
+    )
+    embedding_models: list[str] | None = Field(
+        None, description="Null unless detail=full was requested."
+    )
 
 
 class CollectionList(BaseModel):
     user_id: str
     count: int
+    detail: CollectionDetail
     collections: list[CollectionInfo]
 
 

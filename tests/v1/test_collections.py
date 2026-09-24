@@ -10,20 +10,48 @@ pytestmark = pytest.mark.asyncio
 class TestListing:
     async def test_empty_when_nothing_stored(self, client):
         body = (await client.get("/v1/collections")).json()
-        assert body == {"user_id": "alice", "count": 0, "collections": []}
+        assert body == {
+            "user_id": "alice", "count": 0, "detail": "basic", "collections": []
+        }
 
-    async def test_reports_points_topics_dim_and_models(self, client):
+    async def test_basic_is_the_default_and_omits_facets(self, client):
+        """Topics and models cost a facet call each, so they are opt-in."""
+        await store(client, collection="biology", topic="plant")
+        await store(client, collection="chemistry", topic="organic")
+
+        body = (await client.get("/v1/collections")).json()
+        assert body["detail"] == "basic"
+        assert body["count"] == 2
+        by_name = {c["collection"]: c for c in body["collections"]}
+        assert by_name["biology"]["points"] == 1
+        assert by_name["biology"]["vector_dim"] == 4
+        assert by_name["biology"]["topics"] is None
+        assert by_name["biology"]["embedding_models"] is None
+
+    async def test_full_reports_points_topics_dim_and_models(self, client):
         await store(client, collection="biology", topic="plant")
         await store(client, collection="biology", topic="human")
         await store(client, collection="chemistry", topic="organic")
 
-        body = (await client.get("/v1/collections")).json()
+        body = (await client.get("/v1/collections?detail=full")).json()
+        assert body["detail"] == "full"
         assert body["count"] == 2
         by_name = {c["collection"]: c for c in body["collections"]}
         assert by_name["biology"]["points"] == 2
         assert sorted(by_name["biology"]["topics"]) == ["human", "plant"]
         assert by_name["biology"]["vector_dim"] == 4
         assert by_name["biology"]["embedding_models"] == ["test-model"]
+
+    async def test_invalid_detail_is_rejected(self, client):
+        await store(client)
+        assert (await client.get("/v1/collections?detail=verbose")).status_code == 422
+
+    async def test_single_collection_always_reports_full_detail(self, client):
+        """GET /v1/collections/{c} describes one collection, so it has no cheap mode."""
+        await store(client, topic="plant")
+        body = (await client.get("/v1/collections/biology")).json()
+        assert body["topics"] == ["plant"]
+        assert body["embedding_models"] == ["test-model"]
 
     async def test_sorted_by_name(self, client):
         for name in ("zebra", "apple", "mango"):
@@ -263,7 +291,8 @@ class TestListingScales:
         for _ in range(3):
             await store(client, collection="two", topic="beta")
 
-        by_name = {c["collection"]: c for c in (await client.get("/v1/collections")).json()["collections"]}
+        listing = (await client.get("/v1/collections?detail=full")).json()
+        by_name = {c["collection"]: c for c in listing["collections"]}
         assert by_name["one"]["points"] == 1
         assert by_name["one"]["topics"] == ["alpha"]
         assert by_name["two"]["points"] == 3

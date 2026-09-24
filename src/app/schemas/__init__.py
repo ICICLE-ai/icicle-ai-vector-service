@@ -4,7 +4,12 @@ Re-exported here so callers can ``from ..schemas import EmbeddingRecord``
 without caring which module a model lives in.
 """
 
-from .collections import CollectionInfo, CollectionList, PurgeResponse
+from .collections import (
+    CollectionDetail,
+    CollectionInfo,
+    CollectionList,
+    PurgeResponse,
+)
 from .common import HealthResponse, MetadataFilter
 from .embeddings import (
     BulkDeleteRequest,
@@ -30,6 +35,7 @@ from .search import (
 __all__ = [
     "BulkDeleteRequest",
     "BulkDeleteResponse",
+    "CollectionDetail",
     "CollectionInfo",
     "CollectionList",
     "DeleteResponse",
