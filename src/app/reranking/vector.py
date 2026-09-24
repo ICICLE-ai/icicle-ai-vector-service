@@ -1,20 +1,12 @@
 """Vector-space reranking.
 
-These methods operate purely on the embeddings already returned by Qdrant — no
-model runs and the raw query text is never needed. For true relevance judgement
-over the passage text, see :mod:`app.reranking.cross_encoder`.
+These methods operate on the embeddings returned by Qdrant — no model runs and the
+raw query text is never needed. For relevance judgement over passage text, see
+:mod:`app.reranking.cross_encoder`.
 
-**Why this is vectorised.** MMR compares every candidate against every
-already-selected one, which is O(top_k² × fetch_k × dim) similarity work. Written
-as Python loops that is ~3.8 million float operations per request at the default
-fetch_k=50 over 768 dimensions — tens to hundreds of milliseconds of CPU, run
-*synchronously on the event loop*, which starves every other request on the
-worker. A load test found exactly that: MMR at 10 req/s pushed p50 latency past
-8 seconds while plain search stayed at 125ms.
-
-NumPy does the same arithmetic in compiled code and releases the GIL for the
-large operations, which brings it back into the sub-millisecond range. The
-maths is unchanged; only the execution is.
+The similarity maths is vectorised with NumPy rather than written as Python loops.
+MMR compares every candidate against every already-selected one, which is
+O(top_k^2 * fetch_k * dim) — far too slow in Python to run on the event loop.
 """
 
 from __future__ import annotations

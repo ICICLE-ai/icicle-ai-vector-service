@@ -1,22 +1,17 @@
 """Every Qdrant read and write.
 
-Two rules hold throughout this module, and the tests in ``tests/v1/test_isolation.py``
-exist to keep them true:
+Two invariants hold throughout, enforced by ``tests/v1/test_isolation.py``:
 
-1. **Every operation is scoped.** Reads, counts, scrolls and deletes all go
-   through :mod:`app.db.filters`, which pins ``user_id`` to the caller. Direct
-   point lookups (``retrieve``) cannot be filtered server-side, so they verify
-   ownership on the returned payload before doing anything with it.
-2. **Nothing a user does destroys another user's data.** Each user's collections
-   are physically their own (see :mod:`app.db.naming`), so a delete — including
-   dropping an emptied collection — cannot reach another user's data at all.
-
-The payload filter is therefore defence in depth rather than the sole barrier:
-even a bug in the naming module could not surface another user's points.
+1. Every operation is scoped. Reads, counts, scrolls and deletes go through
+   :mod:`app.db.filters`. Direct point lookups cannot be filtered server-side, so
+   they verify ownership on the returned payload before acting on it.
+2. Nothing a user does destroys another user's data. Each user's collections are
+   physically their own (see :mod:`app.db.naming`).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -44,6 +39,9 @@ Payload = dict[str, Any]
 
 # Upper bound on payloads paged through when deriving distinct topics/models,
 # if the server is too old for the facet API. Keeps listing bounded.
+# Cap on simultaneous per-collection lookups when listing.
+_LIST_CONCURRENCY = 16
+
 _FACET_SCROLL_CAP = 10_000
 _SCROLL_PAGE = 512
 
@@ -482,14 +480,23 @@ async def list_user_collections(
 ) -> list[dict[str, Any]]:
     """List the caller's collections.
 
-    A prefix scan: collections belonging to other users are never inspected, so
-    a user cannot learn what anyone else has created, and the cost scales with
-    *their* collection count rather than the cluster's.
+    A prefix scan, so collections belonging to other users are never inspected.
+
+    Each collection needs four independent Qdrant calls, so they are gathered
+    concurrently rather than serially, bounded by a semaphore.
     """
-    result: list[dict[str, Any]] = []
-    for physical in await owned_collections(client, owner):
-        points = await _count(client, physical, filters.owned_by(owner.username))
-        result.append(await _collection_stats(client, owner, physical, points))
+    physicals = await owned_collections(client, owner)
+    if not physicals:
+        return []
+
+    limiter = asyncio.Semaphore(_LIST_CONCURRENCY)
+
+    async def stats_for(physical: str) -> dict[str, Any]:
+        async with limiter:
+            points = await _count(client, physical, filters.owned_by(owner.username))
+            return await _collection_stats(client, owner, physical, points)
+
+    result = await asyncio.gather(*(stats_for(name) for name in physicals))
     return sorted(result, key=lambda item: item["collection"] or "")
 
 

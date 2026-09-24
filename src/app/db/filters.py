@@ -1,19 +1,12 @@
 """Qdrant filter construction — the tenancy boundary.
 
-Every query, scroll, count and delete this service issues is filtered by
-``user_id``. That filter is built *here* and nowhere else, so the isolation
-guarantee is one small, directly testable module rather than a rule spread
-across a dozen call sites.
+Every query, scroll, count and delete is filtered by ``user_id``. That filter is
+built here and nowhere else, so the isolation guarantee is one testable module.
 
-The invariant every function in this module upholds:
-
-    The returned Filter always pins user_id to exactly one user, and no
-    caller-supplied input can widen, replace or escape that condition.
-
-Caller-supplied conditions are only ever *appended* to ``must``, which in Qdrant
-means logical AND. There is no code path that puts client input into ``should``
-or ``must_not`` at the top level, so extra conditions can only ever narrow a
-result set, never broaden it beyond the user's own data.
+The invariant: every Filter returned pins ``user_id`` to exactly one user, and no
+caller-supplied input can widen, replace or escape it. Client conditions are only
+ever appended to ``must`` (logical AND), never placed in ``should`` or ``must_not``,
+so they can narrow a result set but never broaden it.
 """
 
 from __future__ import annotations

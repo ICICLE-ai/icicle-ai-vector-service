@@ -238,3 +238,33 @@ class TestPurge:
         body = (await client.delete("/v1/collections?confirm=true")).json()
         assert body["deleted"] == 0
         assert body["collections_affected"] == []
+
+
+class TestListingScales:
+    """Listing gathers per-collection stats concurrently."""
+
+    async def test_many_collections_are_all_listed(self, client):
+        for i in range(25):
+            await store(client, collection=f"c{i:02d}")
+        body = (await client.get("/v1/collections")).json()
+        assert body["count"] == 25
+        assert len(body["collections"]) == 25
+
+    async def test_listing_stays_sorted_despite_concurrency(self, client):
+        """gather() completes out of order; the response must not."""
+        for name in ("zebra", "apple", "mango", "kiwi", "banana"):
+            await store(client, collection=name)
+        names = [c["collection"] for c in (await client.get("/v1/collections")).json()["collections"]]
+        assert names == sorted(names)
+
+    async def test_stats_stay_attached_to_the_right_collection(self, client):
+        """Concurrency must not shuffle points/topics between collections."""
+        await store(client, collection="one", topic="alpha")
+        for _ in range(3):
+            await store(client, collection="two", topic="beta")
+
+        by_name = {c["collection"]: c for c in (await client.get("/v1/collections")).json()["collections"]}
+        assert by_name["one"]["points"] == 1
+        assert by_name["one"]["topics"] == ["alpha"]
+        assert by_name["two"]["points"] == 3
+        assert by_name["two"]["topics"] == ["beta"]

@@ -1,39 +1,18 @@
 """Physical Qdrant collection naming.
 
-Every user gets their *own* Qdrant collections. A user-facing collection name
-like ``biology`` becomes a physical collection named after the owner:
+Each user gets their own Qdrant collections:
 
     alice + "biology"  ->  alice_9f2a1c4e7b30__biology
     bob   + "biology"  ->  bob_3d81f5a0c2e9__biology
 
-This is the primary isolation mechanism, and it is structural rather than
-enforced: two users' data live in different Qdrant collections, so there is no
-shared object for an operation to race on or leak through. Concretely it means:
+This is the primary isolation mechanism: two users' data live in different Qdrant
+collections, so vector dimensions are per user and a drop cannot reach anyone else.
+The payload ``user_id`` filter is kept on every query as defence in depth.
 
-* **Dropping an emptied collection is safe.** It is the caller's own collection;
-  no other user can be writing into it, so the "is it empty?" / "drop it" pair
-  no longer has a window in which another user's first write is destroyed.
-* **Vector dimensions are per user.** One user's 768-dimensional ``biology``
-  does not stop another from creating a 1024-dimensional ``biology``, which
-  matters when users bring their own domain-specific embedding models.
-* **Listing is a prefix scan**, not a filtered count across every collection in
-  the cluster.
-
-The payload ``user_id`` filter is *kept* on every query anyway. It is no longer
-load-bearing, but it costs almost nothing and means a hypothetical bug in this
-module still could not surface another user's data.
-
-Naming rules, and why:
-
-* The owner prefix is ``<readable>_<hash>``. The readable part makes collections
-  identifiable when browsing Qdrant directly; the hash is what actually
-  guarantees uniqueness.
-* The hash covers ``tenant_id`` *and* ``username``. Slugifying alone is unsafe —
-  ``a.b`` and ``a-b`` both slugify to ``a_b``, which would silently merge two
-  users. Distinct identities always produce distinct hashes.
-* ``__`` separates the owner prefix from the collection name. Slugs collapse
-  every run of non-alphanumeric characters to a *single* underscore and the hash
-  is hex, so neither component can contain ``__`` and the split is unambiguous.
+The owner prefix is ``<readable>_<hash>``. The hash covers tenant and username, and
+is what guarantees uniqueness — slugifying alone is unsafe, since ``a.b`` and ``a-b``
+both slugify to ``a_b``. Neither component can contain ``__``, so the separator
+splits unambiguously.
 """
 
 from __future__ import annotations

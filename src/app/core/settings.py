@@ -4,10 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # extra="ignore": a .env or a pod's environment routinely carries variables
-    # this service does not own (e.g. a client-side TAPIS_TOKEN). Rejecting them
-    # would crash the app at import time, which is how the stale VECTOR_DIM key
-    # left over from an earlier release broke local startup.
+    # extra="ignore": a .env or pod environment routinely carries variables this
+    # service does not own; rejecting them would fail at import time.
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="", extra="ignore"
     )
@@ -25,38 +23,26 @@ class Settings(BaseSettings):
     tapis_jwks_url: str
     tapis_tenant_id: str
 
-    # --- Storage hygiene ---
-    # Whether emptying a collection also removes it from Qdrant. ON by default:
-    # collections are per user (see app.db.naming), so the collection being
-    # dropped is always the caller's own and no other user can be writing into
-    # it. Set false to keep emptied collections around — e.g. to preserve a
-    # collection's vector dimension across a full delete and re-ingest.
+    # --- Storage ---
+    # Whether emptying a collection also drops it. Safe because collections are
+    # per user; set false to preserve a collection's vector dimension.
     drop_empty_collections: bool = True
 
-    # --- Cross-encoder reranking ---
-    # The cross-encoder is optional: the service runs fine without torch /
-    # sentence-transformers installed, and the "cross_encoder" rerank method
-    # returns 503 in that case. Everything else keeps working.
-    # Default model used when a request does not name one.
+    # --- Cross-encoder reranking (optional; without it that method returns 503) ---
     rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    # Models a request is allowed to select via "rerank_model". Anything outside
-    # this list is rejected, so a client cannot make the pod download and load
-    # arbitrary weights from the internet. Each selected model is loaded once and
-    # cached for the life of the process.
+    # Models a request may select. Anything else is rejected, so a client cannot
+    # make the pod fetch arbitrary weights.
     rerank_allowed_models: list[str] = [
         "BAAI/bge-reranker-base",
         "cross-encoder/ms-marco-MiniLM-L-6-v2",
     ]
-    # Loaded on first use rather than at startup so a pod that never reranks
-    # never pays the memory cost. Set true to warm it during lifespan instead.
+    # True warms the model during startup instead of on first request.
     rerank_preload: bool = False
-    # Torch intra-op threads. Defaults to 0 = let torch decide from the cgroup.
+    # Torch intra-op threads. 0 lets torch decide, which in a container reads the
+    # host's CPU count rather than the cgroup quota — set this explicitly.
     rerank_threads: int = 0
-    # Max candidates a single cross-encoder call will score. This is a fairness
-    # guard as much as a performance one: without it, one user sending fetch_k=500
-    # repeatedly would monopolise the pod's CPU and slow every other user down.
+    # Caps per-request cross-encoder work so one caller cannot monopolise the CPU.
     rerank_max_candidates: int = 128
-    # Truncation length for the (query, passage) pair fed to the model.
     rerank_max_length: int = 512
 
 

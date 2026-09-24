@@ -1,17 +1,12 @@
 """Cross-encoder reranking.
 
-A bi-encoder (what Qdrant stores) compresses the query and each passage into a
-vector *independently*, then compares them once with cosine similarity. A
-cross-encoder instead feeds the pair ``(query_text, passage_text)`` through a
-transformer together, so every query token can attend to every passage token.
-That is a genuine relevance judgement rather than a geometric proxy, and it
-reliably outranks cosine similarity — at the cost of one forward pass per
-candidate, which is why it only ever runs over the shortlist that the vector
-search already narrowed down.
+A bi-encoder embeds query and passage independently and compares the two vectors
+once. A cross-encoder feeds the pair through a transformer together, so it judges
+relevance rather than vector geometry — at the cost of one forward pass per
+candidate, which is why it only runs over the shortlist retrieval produced.
 
-The model is optional. If ``sentence-transformers`` / ``torch`` are not
-installed the rest of the service is unaffected; only ``method="cross_encoder"``
-fails, with a 503 explaining what to install.
+Optional: without ``sentence-transformers`` installed, only
+``method="cross_encoder"`` fails, with a 503.
 """
 
 from __future__ import annotations
