@@ -38,4 +38,7 @@ agents.md
 coverage.xml
 htmlcov/
 .pytest_cache/
-benchmark/
+
+# Benchmark run data and cached corpora (regenerable; the harness itself is tracked)
+benchmark/results/
+benchmark/quality/data/

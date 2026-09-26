@@ -1,0 +1,41 @@
+{
+  "baseline": "retrieve (bi-encoder baseline)",
+  "metric": "ndcg@10",
+  "queries": 300,
+  "resamples": 10000,
+  "seed": 20260923,
+  "results": [
+    {
+      "condition": "mmr (lambda=0.7)",
+      "delta_ndcg": -0.0391,
+      "ci_low": -0.0543,
+      "ci_high": -0.0249,
+      "p": 0.0,
+      "verdict": "WORSE"
+    },
+    {
+      "condition": "cosine_rescore",
+      "delta_ndcg": 0.0,
+      "ci_low": 0.0,
+      "ci_high": 0.0,
+      "p": null,
+      "verdict": "identical to baseline"
+    },
+    {
+      "condition": "cross_encoder: MiniLM-L-6",
+      "delta_ndcg": -0.0392,
+      "ci_low": -0.0673,
+      "ci_high": -0.0108,
+      "p": 0.0064,
+      "verdict": "WORSE"
+    },
+    {
+      "condition": "cross_encoder: bge-reranker-base",
+      "delta_ndcg": -0.0171,
+      "ci_low": -0.0435,
+      "ci_high": 0.0094,
+      "p": 0.2048,
+      "verdict": "not distinguishable"
+    }
+  ]
+}

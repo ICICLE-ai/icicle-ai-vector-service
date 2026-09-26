@@ -1,0 +1,170 @@
+{
+  "collection": "scifact",
+  "corpus_points": 5173,
+  "dimension": 768,
+  "fetch_k": 50,
+  "top_k": 10,
+  "note": "client-side, single user, over the public internet to the Tapis pod",
+  "endpoints": [
+    {
+      "endpoint": "/healthz GET",
+      "note": "unauthenticated; network floor",
+      "n": 30,
+      "p50": 57.9,
+      "p95": 62.6,
+      "p99": 64.0,
+      "min": 54.4,
+      "max": 64.0
+    },
+    {
+      "endpoint": "/v1/rerank/methods GET",
+      "note": "static",
+      "n": 30,
+      "p50": 51.0,
+      "p95": 56.6,
+      "p99": 61.2,
+      "min": 49.1,
+      "max": 61.2
+    },
+    {
+      "endpoint": "/v1/collections GET",
+      "note": "scales with the caller's collection count",
+      "n": 30,
+      "p50": 232.7,
+      "p95": 266.3,
+      "p99": 271.6,
+      "min": 194.1,
+      "max": 271.6
+    },
+    {
+      "endpoint": "/v1/collections/{c} GET",
+      "note": "",
+      "n": 30,
+      "p50": 93.2,
+      "p95": 102.0,
+      "p99": 103.2,
+      "min": 84.5,
+      "max": 103.2
+    },
+    {
+      "endpoint": "/v1/collections/{c}/embeddings GET",
+      "note": "page of 50",
+      "n": 30,
+      "p50": 78.5,
+      "p95": 87.2,
+      "p99": 87.4,
+      "min": 72.3,
+      "max": 87.4
+    },
+    {
+      "endpoint": "/v1/embeddings POST",
+      "note": "3 Qdrant round trips",
+      "n": 30,
+      "p50": 80.5,
+      "p95": 91.2,
+      "p99": 93.2,
+      "min": 73.4,
+      "max": 93.2
+    },
+    {
+      "endpoint": "/v1/embeddings/{id} GET",
+      "note": "",
+      "n": 30,
+      "p50": 66.8,
+      "p95": 71.7,
+      "p99": 72.3,
+      "min": 62.8,
+      "max": 72.3
+    },
+    {
+      "endpoint": "/v1/embeddings/{id} PUT",
+      "note": "",
+      "n": 30,
+      "p50": 123.8,
+      "p95": 132.0,
+      "p99": 138.2,
+      "min": 117.5,
+      "max": 138.2
+    },
+    {
+      "endpoint": "/v1/retrieve POST",
+      "note": "top_k=10 over 5,173 points",
+      "n": 30,
+      "p50": 77.4,
+      "p95": 85.0,
+      "p99": 86.5,
+      "min": 72.9,
+      "max": 86.5
+    },
+    {
+      "endpoint": "/v1/rerank (mmr) POST",
+      "note": "fetch_k=50",
+      "n": 30,
+      "p50": 134.7,
+      "p95": 159.6,
+      "p99": 344.1,
+      "min": 119.1,
+      "max": 344.1
+    },
+    {
+      "endpoint": "/v1/rerank (cosine_rescore) POST",
+      "note": "fetch_k=50",
+      "n": 30,
+      "p50": 137.6,
+      "p95": 143.7,
+      "p99": 147.7,
+      "min": 125.1,
+      "max": 147.7
+    },
+    {
+      "endpoint": "/v1/rerank (cross_encoder MiniLM) POST",
+      "note": "fetch_k=50, 50 model passes",
+      "n": 8,
+      "p50": 2192.3,
+      "p95": 2407.8,
+      "p99": 2407.8,
+      "min": 2081.8,
+      "max": 2407.8
+    },
+    {
+      "endpoint": "/v1/rerank (cross_encoder bge) POST",
+      "note": "fetch_k=50, 50 model passes",
+      "n": 4,
+      "p50": 11596.7,
+      "p95": 12211.8,
+      "p99": 12211.8,
+      "min": 11477.4,
+      "max": 12211.8
+    },
+    {
+      "endpoint": "DELETE /v1/embeddings/{id}",
+      "note": "",
+      "n": 30,
+      "p50": 78.6,
+      "p95": 85.9,
+      "p99": 107.7,
+      "min": 70.6,
+      "max": 107.7
+    },
+    {
+      "endpoint": "POST /v1/embeddings/bulk-delete",
+      "note": "5 points by metadata filter",
+      "n": 10,
+      "p50": 87.2,
+      "p95": 100.6,
+      "p99": 100.6,
+      "min": 79.2,
+      "max": 100.6
+    },
+    {
+      "endpoint": "DELETE /v1/collections/{c}",
+      "note": "drops a 1-point collection",
+      "n": 10,
+      "p50": 81.8,
+      "p95": 84.7,
+      "p99": 84.7,
+      "min": 78.8,
+      "max": 84.7
+    }
+  ]
+}

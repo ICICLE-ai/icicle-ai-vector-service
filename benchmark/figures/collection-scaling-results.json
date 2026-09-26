@@ -1,0 +1,62 @@
+{
+  "dim": 128,
+  "samples_per_point": 7,
+  "rows": [
+    {
+      "collections": 35,
+      "list_basic_ms": 283.3,
+      "list_full_ms": 470.9,
+      "search_ms": 74.4,
+      "write_ms": 75.2
+    },
+    {
+      "collections": 60,
+      "list_basic_ms": 292.8,
+      "list_full_ms": 464.7,
+      "search_ms": 114.1,
+      "write_ms": 79.4
+    },
+    {
+      "collections": 85,
+      "list_basic_ms": 291.5,
+      "list_full_ms": 481.6,
+      "search_ms": 116.6,
+      "write_ms": 81.0
+    },
+    {
+      "collections": 110,
+      "list_basic_ms": 272.0,
+      "list_full_ms": 453.0,
+      "search_ms": 111.4,
+      "write_ms": 81.5
+    },
+    {
+      "collections": 135,
+      "list_basic_ms": 275.6,
+      "list_full_ms": 485.5,
+      "search_ms": 114.5,
+      "write_ms": 76.4
+    },
+    {
+      "collections": 160,
+      "list_basic_ms": 279.7,
+      "list_full_ms": 480.9,
+      "search_ms": 114.3,
+      "write_ms": 79.7
+    },
+    {
+      "collections": 185,
+      "list_basic_ms": 285.2,
+      "list_full_ms": 490.6,
+      "search_ms": 115.1,
+      "write_ms": 77.0
+    },
+    {
+      "collections": 210,
+      "list_basic_ms": 310.7,
+      "list_full_ms": 490.5,
+      "search_ms": 114.8,
+      "write_ms": 80.7
+    }
+  ]
+}

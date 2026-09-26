@@ -1,0 +1,22 @@
+- id: "ICICLEAIVectorDBService:1.0.0"
+  owner: "Amit Vyas"
+  primaryThrust: "core/CI4AI"
+  name: "ICICLE AI Vector DB Service"
+  status: "ProductionRelease"
+  description: "FastAPI + Qdrant vector storage and retrieval service for the ICICLE AI Tapis tenant. This service handles storage, search, and reranking."
+  componentVersion: "1.0.0"
+  targetIcicleRelease: "2026-09"
+
+  hasDependentComponents:
+    - related_to: "ICICLEAIVectorDBService:0.1.0"
+      relationship_type: "DependsOn"
+
+  licenseUrl: "https://github.com/ICICLE-ai/icicle-ai-vector-service?tab=GPL-3.0-1-ov-file"
+  publicAccess: true
+  sourceCodeUrl: "https://github.com/ICICLE-ai/icicle-ai-vector-service"
+  codeReviewConducted: true
+  testsWritten: true
+  developerDocumentationAvailable: true
+  developerDocumentationUrl: "https://icicle-ai.github.io/training-catalog/api/ICICLE%20Vector%20DB%20Service/icicle-ai-vector-service"
+  trainingTutorialsAvailable: true
+  trainingTutorialsUrl: "https://icicle-ai.github.io/training-catalog/docs/ICICLE%20Vector%20DB%20Service"

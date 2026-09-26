@@ -93,9 +93,7 @@ curl http://localhost:8000/healthz
 # {"status":"ok","version":"1.0.0","qdrant":"ok","cross_encoder":true}
 ```
 
-`cross_encoder` reports whether this deployment can do cross-encoder reranking.
-It is `false` when the optional `[rerank]` extra was not installed — everything
-else still works.
+`cross_encoder` reports whether cross-encoder reranking is available.
 
 ### Step 5 (optional): Enable cross-encoder reranking
 
@@ -124,7 +122,7 @@ Every request (except `/healthz`) requires a valid **ICICLE AI tenant** Tapis ac
 
 ### How to get your access token
 
-Log in to the [ICICLEaaS Portal](https://icicleai.tapis.io), click your username in the bottom-left corner, and select **Copy Access Token**.
+Log in to the [ICICLE AI Tapis UI](https://icicleai.tapis.io), click your username in the bottom-left corner, and select **Copy Access Token**.
 
 ![Getting your Tapis access token](docs/images/tapis-access-token.png)
 
@@ -641,22 +639,6 @@ python scripts/export_openapi.py
 CI runs `--check` on that script and fails if `openapi.json` has drifted from
 the app.
 
-## Troubleshooting
-
-- **"Qdrant is not reachable"**: If Qdrant is behind an HTTPS reverse proxy (port 443), append `:443` to `QDRANT_URL` (e.g. `https://host.example.com:443`). The qdrant-client library defaults to port 6333 if no port is specified.
-- **401/403 errors**: Ensure your Tapis token is fresh, from the `icicleai` tenant, and passed via the `X-Tapis-Token` header.
-- **Dimension mismatch**: The `embedding` array length must match the collection's dimension (set by the first embedding stored in that collection).
-- **`422` "collection must be a non-empty string"**: every retrieve and rerank request must name the collection to query.
-- **Cross-encoder is far slower than expected**: the container is probably CPU-throttled. In a container `nproc` reports the *host's* CPU count, not the cgroup quota, so torch, OpenBLAS and tokenizers each size their thread pools far too high and spend most of each scheduling period stalled. Check with `cat /sys/fs/cgroup/cpu.max` (gives `QUOTA PERIOD`, so `1001000 100000` = 10 CPUs) and `cat /sys/fs/cgroup/cpu.stat` (compare `nr_throttled` to `nr_periods`). Then pin `RERANK_THREADS`, `OMP_NUM_THREADS` and `OPENBLAS_NUM_THREADS` to the quota. On the ICICLE TACC deployment, 32 visible CPUs against a 10-CPU quota throttled 30% of periods and cost roughly 25x.
-- **`503` on `method="cross_encoder"`**: the optional `[rerank]` extra is not installed in this deployment. Install it (see Quickstart Step 5) or use `mmr` / `cosine_rescore`. `GET /healthz` reports `cross_encoder: false` in this case.
-- **First cross-encoder request is slow (10–20s)**: the model weights are being downloaded and loaded. Subsequent requests are fast. Set `RERANK_PRELOAD=true` to pay this during startup, or mount a volume at `$HF_HOME` so the download survives pod restarts.
-- **`400` "Reranker model is not allowed"**: `rerank_model` must be one of `RERANK_ALLOWED_MODELS`. Check `GET /v1/rerank/methods` for the current list.
-- **Cross-encoder scores look strange on non-English text**: `ms-marco-MiniLM-L-6-v2` is English-only and returns meaningless scores rather than an error on other languages. Use `BAAI/bge-reranker-base`.
-- **Deleted a collection but it still exists**: expected when another user still has points in it. `collection_dropped: false` means only your points were removed.
-- **App exits at startup with a pydantic `extra_forbidden` error**: an older release rejected unknown keys in `.env`. As of v1.0.0 unknown keys are ignored, so stale entries like `VECTOR_DIM` are harmless.
-
----
-
 # Explanation
 
 ## Architecture
@@ -826,25 +808,6 @@ src/app/
     └── search.py            /v1/retrieve, /v1/rerank
 ```
 
-### Why the `__init__.py` files
-
-One per package — that is simply how Python marks a directory as importable, so
-the count tracks the number of packages, not any redundancy. None of them are
-empty filler: each one declares what its package exports, so callers can write
-`from ..schemas import EmbeddingRecord` without knowing which module a model
-lives in, and `reranking/__init__.py` additionally holds the `rerank()` dispatch
-function.
-
-`__pycache__/` directories are CPython's compiled-bytecode cache. Python writes
-them automatically next to any module it imports, they are regenerated whenever
-a source file changes, and they are already in `.gitignore`, so none of them are
-committed. Deleting them is always safe — Python just rebuilds them on the next
-import. To clear them:
-
-```bash
-find . -name __pycache__ -type d -prune -exec rm -rf {} +
-```
-
 ## How User Isolation Works
 
 Each user's collections are physically separate Qdrant collections, so isolation is
@@ -919,100 +882,49 @@ is built this way and what it costs.
 
 ## Why Collections Are Per User
 
-This is the service's most consequential design decision, and it deliberately
-departs from Qdrant's default recommendation. The reasoning is worth stating,
-because the right answer changes with scale.
+Qdrant's multitenancy guidance is to keep every tenant in **one** collection,
+partitioned by a payload field. That is the right default for a product: tenants are
+customers of the same application, running the same model, and the operator wants
+many of them cheaply.
 
-### What Qdrant recommends
-
-Qdrant's multitenancy guidance is unambiguous:
-
-> "Creating a separate collection for each tenant is rarely the most efficient
-> approach." … "Each collection carries its own resource overhead, so creating many
-> collections can quickly become expensive."
-
-The recommended pattern is a **single collection partitioned by a payload field**,
-with `is_tenant=true` on that field so Qdrant co-locates each tenant's vectors on
-disk. Qdrant Cloud caps a cluster at 1,000 collections by default, which signals
-where they consider the practical boundary.
-
-The same page carves out an exception, and it describes this service:
-
-> "Only create multiple collections when you have a limited number of tenants that
-> need strict isolation."
-
-### Why the exception applies here
-
-**Researchers bring their own embedding models.** A vector collection's dimension is
-fixed by its first embedding and can never change. Under a single shared collection,
-whoever stores first fixes the dimension for *everyone*:
+A research tenant is not that. Users arrive from different domains with an embedding
+model already chosen by their science — Gemini at 768 dimensions, NVClip at 1024,
+NV-Embed at 4096. A collection's vector dimension is fixed by its first embedding and
+can never change, so a single shared collection would let whoever stores first fix
+the dimension for everyone:
 
 ```
-SHARED COLLECTION                         PER-USER COLLECTIONS
-
-embeddings (768d — fixed globally)        alice_9f2a__bio    768d   ✓  Gemini
-  alice, gemini-embedding-001  768d  ✓    bob_1110__bio     1024d   ✓  NVClip
-  bob,   nvidia/nvclip        1024d  ✗    carol_4d81__bio   4096d   ✓  NV-Embed
-  carol, NV-Embed-v1          4096d  ✗
+SHARED COLLECTION                       PER-USER COLLECTIONS
+embeddings (768d, fixed globally)       alice_9f2a__bio    768d   ✓  Gemini
+  alice, 768d   ✓                       bob_1110__bio     1024d   ✓  NVClip
+  bob,  1024d   ✗                       carol_4d81__bio   4096d   ✓  NV-Embed
+  carol, 4096d  ✗
 ```
 
-For a general-purpose product that is an acceptable constraint — you pick a model and
-standardise. For a research platform it is not. Users arrive from different domains
-with models already chosen by their science, and a service that forces a single
-embedding model forces a single research methodology.
+Giving each user their own collections buys three things that matter for research
+use:
 
-**Experiments need dimensions side by side.** Comparing two embedding models on the
-same corpus means holding both in the service simultaneously. Under a shared
-collection that is impossible without a second deployment. This repository's own
-benchmark relies on it: `benchmark/scripts/dim_sweep.sh` runs six collections at 768,
-1024, 1536, 2048, 3072 and 4096 dimensions under a single account.
+- **Any model, any dimension**, chosen per collection rather than per deployment.
+- **Side-by-side experiments** — the same corpus embedded two ways, held at once.
+  This repository's own `benchmark/scripts/dim_sweep.sh` relies on it, running six
+  collections from 768 to 4096 dimensions under a single account.
+- **Structural isolation** — two users' vectors are never in the same index, so a
+  missed filter on some future endpoint has nothing to leak into.
 
-**Isolation is structural, not procedural.** Two users' vectors are never in the same
-index, so a missed filter on some future endpoint cannot leak data — there is nothing
-to leak into. Under a shared collection the payload filter is the only barrier, and
-every new query path must apply it correctly, forever.
+The cost is collection count: Qdrant Cloud caps a cluster at 1,000 by default, and
+200 users with five collections each would reach it. Measurements show search and
+write latency are unaffected by collection count, and listing is paginated, so the
+ceiling is a Qdrant resource limit rather than a latency one (see
+[benchmark/REPORT.md](benchmark/REPORT.md) §5.4).
 
-**Deleting a user is cheap and complete.** Dropping their collections removes
-everything they own. Under a shared collection it is a filtered delete across an
-index holding everyone else's data.
-
-### What it costs
-
-| | Per-user collections (this service) | Single shared collection |
-| --- | --- | --- |
-| Vector dimension | per user, per collection | one, globally |
-| Isolation | physical | payload filter only |
-| Cost of a missed filter | nothing — wrong data is not present | every user's data |
-| Collections in Qdrant | users × collections each | 1 |
-| Practical ceiling | ~1,000 collections | millions of tenants |
-
-The ceiling is the real cost. At 200 users with 5 collections each you reach 1,000,
-and nothing in the service currently caps collections per user.
-
-### When to revisit
-
-Around **500 collections**, start watching Qdrant's memory. The migration target is
-*not* the pure shared model but a middle ground that keeps what matters:
-
-```
-one collection per DIMENSION, payload-partitioned by user
-
-shared_768   ── all 768-dim users,  isolated by user_id filter
-shared_1024  ── all 1024-dim users
-shared_4096  ── all 4096-dim users
-```
-
-Collection count then depends on how many embedding dimensions exist in practice — a
-handful — rather than on user count. Dimension flexibility survives, Qdrant's
-recommended `is_tenant=true` layout applies, and the 1,000-collection ceiling
-disappears. The trade is that isolation becomes logical again.
-
-Because all naming lives in `db/naming.py` and all filtering in `db/filters.py`,
-that migration means rewriting two small modules, not the service.
+If that ceiling is ever reached, the migration is one collection **per dimension**
+partitioned by user — a handful of collections instead of one per user — which keeps
+the dimension freedom. All naming lives in `db/naming.py` and all filtering in
+`db/filters.py`, so that change is two modules, not the service.
 
 ## Design Decisions
 
-- **Collection = broad domain**: Each domain (e.g. `biology`, `chemistry`) gets its own Qdrant collection with its own HNSW index. Similarity search only traverses vectors in the same domain, resulting in higher relevance and faster queries.
+- **Collection = broad domain, per user**: each of your domains (e.g. `biology`, `chemistry`) is its own Qdrant collection with its own HNSW index and vector dimension. Search only traverses vectors in that one collection, which keeps relevance high and queries fast.
 - **Topic = optional sub-category**: Topics (e.g. `human`, `plant`, `organic`) are payload fields within a collection. They allow narrowing search results without creating separate collections. A collection can have embeddings with different topics, or no topic at all.
 - **User isolation is physical, with a filter as backup**: each user's collections are separate Qdrant collections (see [Why Collections Are Per User](#why-collections-are-per-user)), so two users' vectors are never in the same index. Every query *also* filters by `user_id` from the JWT, which is defence in depth rather than the barrier itself.
 - **No server-side embedding**: Clients provide pre-computed vectors. This keeps the service model-agnostic and lightweight — any embedding model works. The vector dimension is set per collection by the first embedding stored.
@@ -1020,11 +932,11 @@ that migration means rewriting two small modules, not the service.
 - **Metadata filtering at search time**: Qdrant applies payload filters during the HNSW traversal (not as a post-filter), so filtered searches remain efficient even on large collections.
 - **Auth boundary**: JWKS-validated Tapis JWTs are the sole security gate. CORS is open by default (`*`) since the token is what matters, not the origin.
 - **Update/Delete require collection**: Since Qdrant doesn't support global ID lookups across collections, the `collection` query param is required on update/delete to enable a direct O(1) lookup by embedding ID.
-- **Deletes are scoped; collections are not dropped by default**: `DELETE /v1/collections/{collection}` removes only the caller's points. Dropping the emptied Qdrant collection is opt-in via `DROP_EMPTY_COLLECTIONS` because the emptiness check and the drop cannot be made atomic — see [How User Isolation Works](#how-user-isolation-works).
-- **The collection namespace is isolated too**: `GET /v1/collections` lists only collections the caller owns points in, and all counts and topic lists are filtered by `user_id`. Users do not learn which collections other users created.
+- **Deletes are scoped, and dropping is safe**: `DELETE /v1/collections/{collection}` removes only the caller's own collection. Because collections are per user, dropping it cannot affect anyone else, so `DROP_EMPTY_COLLECTIONS` defaults to on. Set it false to keep an emptied collection and preserve its vector dimension.
+- **The collection namespace is isolated too**: `GET /v1/collections` is a prefix scan over the caller's own namespace, so users never learn which collections others created.
 - **Bulk delete filters on `user_id`, including by id**: the by-id path ANDs `HasIdCondition` with the caller's `user_id` rather than deleting the ids outright, so passing another user's point id deletes nothing instead of succeeding.
 - **Purge is opt-in**: `DELETE /v1/collections` requires `?confirm=true`, so an unqualified DELETE against the collection root cannot wipe an account.
-- **Tenant-aware payload indexes**: `user_id`, `topic` and `embedding_model` get keyword indexes when a collection is created, and `user_id` is declared with `is_tenant=True` — Qdrant's documented multi-tenant layout, which groups each user's points together on disk. Without an index Qdrant does a full payload scan during HNSW traversal, which degrades badly as collections grow. Collections created before v1.0.0 are backfilled on startup, since creating an existing index is a no-op.
+- **Payload indexes on the filter fields**: `user_id`, `topic` and `embedding_model` get keyword indexes when a collection is created. Without them Qdrant does a full payload scan during HNSW traversal, which degrades as collections grow. Collections created before v1.0.0 are backfilled on startup, since creating an existing index is a no-op.
 - **Reranking is optional and swappable**: the cross-encoder lives behind an optional `[rerank]` extra. Without it the service runs unchanged and only `method="cross_encoder"` returns `503`. Models are restricted to an allowlist so a client cannot make the pod download arbitrary weights.
 - **Versioned router package**: endpoints live in `src/app/api/v1/`, with the `/v1` prefix declared in exactly one place (`api/v1/__init__.py`). Adding a v2 means a sibling package, not edits spread across handlers.
 - **Layered, not flat**: configuration, schemas, persistence and reranking are separate packages rather than loose modules beside `main.py`. The point is the dependency direction — `api/` may import `db/`, never the reverse — which is what keeps the tenancy filter impossible to bypass from a handler.
